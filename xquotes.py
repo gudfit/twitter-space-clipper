@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 import re
 from dotenv import load_dotenv
+import time
 
 # Load environment variables
 load_dotenv()
@@ -145,6 +146,32 @@ def parse_transcript_segments(transcript: str, speakers: List[str]) -> List[Dict
     
     return segments
 
+def chunk_transcript(transcript: str, max_chunk_size: int = 8000) -> List[str]:
+    """Split transcript into manageable chunks while preserving sentence boundaries."""
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    
+    # Split by sentences (roughly)
+    sentences = re.split(r'(?<=[.!?])\s+', transcript)
+    
+    for sentence in sentences:
+        sentence_size = len(sentence)
+        if current_size + sentence_size > max_chunk_size and current_chunk:
+            # Join current chunk and add to chunks
+            chunks.append(' '.join(current_chunk))
+            current_chunk = [sentence]
+            current_size = sentence_size
+        else:
+            current_chunk.append(sentence)
+            current_size += sentence_size
+    
+    # Add the last chunk if it exists
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+    
+    return chunks
+
 def extract_speaker_quotes(transcript: str, speaker_info: Dict) -> List[str]:
     """Extract the best quotes for each speaker using DeepSeek"""
     try:
@@ -178,59 +205,63 @@ def extract_speaker_quotes(transcript: str, speaker_info: Dict) -> List[str]:
             print(f"❌ No segments found for {speaker}")
             return []
             
-        # Combine segments into context for DeepSeek
-        context = "\n\n".join([
-            f"{s['speaker']}: {s['text']}"
-            for s in speaker_segments
-        ])
+        # Process segments in chunks to avoid API limits
+        all_quotes = []
+        chunks = chunk_transcript('\n\n'.join([s['text'] for s in speaker_segments]))
         
-        # Ask DeepSeek to extract the best quotes
-        response = call_deepseek_api([
-            {"role": "system", "content": """You are an expert at identifying impactful and quotable moments from conversations. Your task is to extract the most interesting, insightful, or memorable quotes that would work well on Twitter. Each quote should:
+        print(f"\n📊 Processing {len(chunks)} chunks of transcript...")
+        for i, chunk in enumerate(chunks, 1):
+            print(f"\n🔄 Processing chunk {i}/{len(chunks)}...")
+            
+            # Ask DeepSeek to extract quotes from this chunk
+            response = call_deepseek_api([
+                {"role": "system", "content": """You are an expert at identifying impactful and quotable moments from conversations. Your task is to extract the most interesting, insightful, or memorable quotes that would work well on Twitter. Each quote should:
 1. Be self-contained and meaningful on its own
 2. Be under 240 characters
 3. Capture a key insight, opinion, or memorable statement
 4. Be something the speaker would be proud to have quoted
 
 Format each quote on a new line, starting with the speaker's handle."""},
-            {"role": "user", "content": f"""Extract the best quotes from these segments by {speaker}. Format each quote on a new line starting with their handle.
+                {"role": "user", "content": f"""Extract the best quotes from this segment by {speaker}. Format each quote on a new line starting with their handle.
 
-{context}"""}
-        ])
-        
-        if not response:
-            return []
+{chunk}"""}
+            ])
             
-        quotes = []
-        raw_quotes = response['choices'][0]['message']['content'].strip().split('\n')
-        
-        for quote in raw_quotes:
-            quote = quote.strip()
-            if not quote:
-                continue
+            if response:
+                raw_quotes = response['choices'][0]['message']['content'].strip().split('\n')
+                for quote in raw_quotes:
+                    quote = quote.strip()
+                    if not quote:
+                        continue
+                    
+                    # Clean and format quote
+                    quote = clean_quote(quote)
+                    if len(quote) <= 240:  # Twitter limit
+                        all_quotes.append(quote)
+                        print(f"✅ Added quote ({len(quote)} chars)")
             
-            # Clean and format quote
-            quote = clean_quote(quote)
-            if len(quote) <= 240:  # Twitter limit
-                quotes.append(quote)
+            # Add a small delay between chunks to avoid rate limits
+            if i < len(chunks):
+                time.sleep(1)
         
-        return quotes
+        print(f"\n✨ Generated {len(all_quotes)} total quotes")
+        return all_quotes
         
     except Exception as e:
         print(f"Error extracting quotes: {str(e)}")
         return []
 
 def create_quote_thread(transcript: str, space_info: Dict) -> List[str]:
-    """Create a thread of the best quotes from the Space"""
+    """Create a thread of the best quotes from the content"""
     print("\n🎯 Starting quote generation process...")
-    print(f"Transcript length: {len(transcript)} characters")
-    print(f"Space info: {space_info}")  # Log space info for debugging
+    print(f"Transcript length: {len(transcript):,} characters")
+    print(f"Content info: {space_info}")  # Log content info for debugging
     
     if not space_info or not transcript:
-        print("❌ Missing required data (space_info or transcript)")
+        print("❌ Missing required data (content_info or transcript)")
         return []
     
-    # Extract quotes for each speaker
+    # Extract quotes for each speaker if speaker info available
     quotes = []
     all_speakers = [space_info.get('host')] + space_info.get('speakers', []) if space_info.get('host') else space_info.get('speakers', [])
     
@@ -248,39 +279,39 @@ def create_quote_thread(transcript: str, space_info: Dict) -> List[str]:
             else:
                 print(f"⚠️ No quotes generated for {speaker}")
     else:
-        print("⚠️ No speakers found in space_info")
-    
-    # If no quotes found, try extracting without speaker attribution
-    if not quotes:
-        print("\n🔄 No speaker quotes found, trying general quote extraction...")
-        response = call_deepseek_api([
-            {"role": "system", "content": """You are an expert at identifying impactful and quotable moments from conversations. Extract the most interesting, insightful, or memorable quotes that would work well on Twitter. Each quote should:
+        print("⚠️ No speakers found, trying general quote extraction...")
+        
+        # Process transcript in chunks
+        chunks = chunk_transcript(transcript)
+        print(f"\n📊 Processing {len(chunks)} chunks of transcript...")
+        
+        for i, chunk in enumerate(chunks, 1):
+            print(f"\n🔄 Processing chunk {i}/{len(chunks)}...")
+            response = call_deepseek_api([
+                {"role": "system", "content": """You are an expert at identifying impactful and quotable moments from conversations. Extract the most interesting, insightful, or memorable quotes that would work well on social media. Each quote should:
 1. Be self-contained and meaningful on its own
 2. Be under 240 characters
 3. Capture a key insight, opinion, or memorable statement"""},
-            {"role": "user", "content": f"Extract the best quotes from this transcript:\n\n{transcript}"}
-        ])
-        
-        if response and response.get('content'):
-            print("\n📝 Processing DeepSeek response...")
-            raw_quotes = response['content'].strip().split('\n')
-            print(f"Found {len(raw_quotes)} raw quotes")
+                {"role": "user", "content": f"Extract the best quotes from this transcript segment:\n\n{chunk}"}
+            ])
             
-            for quote in raw_quotes:
-                quote = clean_quote(quote)
-                if quote and len(quote) <= 240:
-                    quotes.append(quote)
-                    print(f"✅ Added quote ({len(quote)} chars): {quote[:50]}...")
-                else:
-                    if not quote:
-                        print("⚠️ Skipping empty quote")
+            if response and response.get('content'):
+                raw_quotes = response['content'].strip().split('\n')
+                
+                for quote in raw_quotes:
+                    quote = clean_quote(quote)
+                    if quote and len(quote) <= 240:
+                        quotes.append(quote)
+                        print(f"✅ Added quote ({len(quote)} chars): {quote[:50]}...")
                     else:
-                        print(f"⚠️ Skipping quote - too long ({len(quote)} chars)")
+                        if not quote:
+                            print("⚠️ Skipping empty quote")
+                        else:
+                            print(f"⚠️ Skipping quote - too long ({len(quote)} chars)")
             
-            print(f"\n✨ Added {len(quotes)} valid quotes")
-        else:
-            print("❌ Failed to generate general quotes - invalid or empty response")
-            print(f"Response: {response}")
+            # Add a small delay between chunks to avoid rate limits
+            if i < len(chunks):
+                time.sleep(1)
     
     print(f"\n🎉 Quote generation complete! Generated {len(quotes)} total quotes")
     return quotes

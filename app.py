@@ -477,6 +477,32 @@ def display_quotes(quotes: List[str], container: st.container) -> None:
                 mime="text/plain"
             )
 
+def chunk_transcript(transcript: str, chunk_size: int = 50000) -> List[str]:
+    """Split transcript into manageable chunks while preserving sentence boundaries."""
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    
+    # Split by sentences (roughly)
+    sentences = re.split(r'(?<=[.!?])\s+', transcript)
+    
+    for sentence in sentences:
+        sentence_size = len(sentence)
+        if current_size + sentence_size > chunk_size and current_chunk:
+            # Join current chunk and add to chunks
+            chunks.append(' '.join(current_chunk))
+            current_chunk = [sentence]
+            current_size = sentence_size
+        else:
+            current_chunk.append(sentence)
+            current_size += sentence_size
+    
+    # Add the last chunk if it exists
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+    
+    return chunks
+
 if not check_password():
     st.stop()  # Do not continue if check_password is not True.
 
@@ -609,9 +635,41 @@ with main_col:
                 if os.path.exists(process_result['transcript_path']):
                     with open(process_result['transcript_path'], 'r') as f:
                         transcript = f.read()
-                    st.text_area("Full Transcript", transcript, height=300)
+                    
+                    # Split transcript into chunks
+                    chunks = chunk_transcript(transcript)
+                    total_chunks = len(chunks)
+                    
+                    # Add chunk navigation
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"Transcript length: {len(transcript):,} characters ({total_chunks} pages)")
+                    with col2:
+                        chunk_idx = st.number_input("Page", min_value=1, max_value=total_chunks, value=1) - 1
+                    
+                    # Show current chunk with some context
+                    st.text_area(
+                        f"Transcript (Page {chunk_idx + 1}/{total_chunks})", 
+                        chunks[chunk_idx],
+                        height=400
+                    )
+                    
+                    # Navigation buttons
+                    col1, col2, col3 = st.columns([1, 2, 1])
+                    with col1:
+                        if chunk_idx > 0:
+                            if st.button("⬅️ Previous Page"):
+                                st.session_state.chunk_idx = max(0, chunk_idx - 1)
+                                st.rerun()
+                    with col3:
+                        if chunk_idx < total_chunks - 1:
+                            if st.button("Next Page ➡️"):
+                                st.session_state.chunk_idx = min(total_chunks - 1, chunk_idx + 1)
+                                st.rerun()
+                    
+                    # Download button for full transcript
                     st.download_button(
-                        "⬇️ Download Transcript",
+                        "⬇️ Download Full Transcript",
                         transcript,
                         file_name=f"transcript_{space_id[:8]}.txt",
                         mime="text/plain"
