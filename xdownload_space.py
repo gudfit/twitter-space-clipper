@@ -3,10 +3,10 @@ import os
 
 def download_twitter_space(url: str, output_dir: str = "downloads") -> str:
     """
-    Download a Twitter Space using yt-dlp.
+    Download media using yt-dlp.
     
     Args:
-        url: URL of the Twitter Space
+        url: URL of the media
         output_dir: Directory to save the downloaded audio
         
     Returns:
@@ -29,5 +29,5 @@ def download_twitter_space(url: str, output_dir: str = "downloads") -> str:
             audio_path = os.path.join(output_dir, f"{info['id']}.mp3")
             return audio_path
     except Exception as e:
-        print(f"Error downloading Twitter Space: {str(e)}")
+        print(f"Error downloading media: {str(e)}")
         raise

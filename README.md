@@ -1,9 +1,9 @@
-# Twitter Space Clipper
+# Media Content Clipper
 
-Extract audio clips from Twitter Spaces based on quotes and timestamps.
+Extract audio clips from any media source based on quotes and timestamps. Supports media, YouTube videos, podcasts, and other online media.
 
 ## Features
-- Download Twitter Space recordings using yt-dlp
+- Download media from various sources using yt-dlp
 - Transcribe audio using OpenAI's Whisper
 - Generate quotes from transcripts using DeepSeek AI
 - Create audio clips for specific quotes
@@ -50,9 +50,9 @@ Then open your browser to the displayed URL (typically http://localhost:8501)
 ### Command Line Interface
 For advanced users, you can also use the command line tools:
 
-1. Download and transcribe a Twitter Space:
+1. Download and transcribe media:
 ```bash
-python xspace.py "https://twitter.com/i/spaces/your-space-id"
+python xspace.py "URL_TO_MEDIA"
 ```
 
 2. Extract audio clips from quotes:
@@ -62,10 +62,16 @@ python xclips.py path/to/quotes.txt [--audio audio_file] [--output output_dir]
 
 The clips will be saved in a 'clips' subdirectory by default.
 
+## Supported Media Sources
+- media
+- YouTube videos
+- Podcasts
+- Any audio/video source supported by yt-dlp
+
 ## Scripts
 - `app.py` - Streamlit web interface
-- `xspace.py` - Download and process Twitter Spaces
+- `xspace.py` - Download and process media content
 - `xclips.py` - Create audio clips from quotes
 - `xquotes.py` - Generate quotes from transcripts using DeepSeek AI
 - `transcribe.py` - Transcribe audio using Whisper
-- `xdownload_space.py` - Download Twitter Space recordings using yt-dlp
+- `xdownload_space.py` - Download media using yt-dlp

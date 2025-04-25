@@ -72,7 +72,7 @@ st.set_page_config(
 # Check for ffmpeg at startup
 if not check_ffmpeg():
     st.error("""
-    ⚠️ ffmpeg is not installed or not found in PATH. This is required for processing Twitter Spaces.
+    ⚠️ ffmpeg is not installed or not found in PATH. This is required for processing media.
     
     To install ffmpeg:
     - Ubuntu/Debian: `sudo apt-get install ffmpeg`
@@ -170,7 +170,7 @@ class ProgressCallback:
                 self.progress_bar.progress(progress, status_text)
 
 def download_with_progress(url: str, output_dir: str, progress_bar) -> Optional[str]:
-    """Download Twitter Space with progress tracking."""
+    """Download media with progress tracking."""
     # First download without post-processing
     download_opts = {
         'format': 'bestaudio/best',
@@ -275,7 +275,7 @@ def check_password():
 
 @st.cache_data(show_spinner=False)
 def process_space(url: str, _progress_container) -> dict:
-    """Process a Twitter Space URL and return paths to generated files."""
+    """Process media URL and return paths to generated files."""
     try:
         log_processing_step("Space processing", "started", f"URL: {url}")
         space_id = get_space_id(url)
@@ -489,7 +489,7 @@ main_col, log_col = st.columns([2, 1])
 
 with main_col:
     # URL input
-    space_url = st.text_input("Paste Media URL:", placeholder="https://twitter.com/i/spaces/...")
+    space_url = st.text_input("Paste Media URL:", placeholder="https://x.com/i/status/1915404626754494957")
 
     if space_url:
         space_id = get_space_id(space_url)
@@ -503,7 +503,7 @@ with main_col:
 
         if not st.session_state.processing_complete:
             progress_container = st.container()
-            with st.status("Processing Twitter Space...", expanded=True) as status:
+            with st.status("Processing media...", expanded=True) as status:
                 try:
                     process_result = process_space(space_url, progress_container)
                     if process_result:
@@ -647,7 +647,7 @@ with log_col:
 with st.sidebar:
     st.subheader("📖 Instructions")
     st.write("""
-    1. Paste a Twitter Space URL
+    1. Paste media URL
     2. Wait for processing (this may take a few minutes)
     3. View and download:
         - Generated quotes
@@ -657,7 +657,7 @@ with st.sidebar:
     
     st.subheader("💡 Tips")
     st.write("""
-    - For best results, use recent Twitter Spaces
+    - For best results, use recent media
     - Quotes are automatically formatted for social media
     - You can download everything for offline use
     """)
