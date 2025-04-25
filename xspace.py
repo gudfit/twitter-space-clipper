@@ -8,12 +8,12 @@ import yt_dlp
 import re
 from dotenv import load_dotenv
 import whisper
-import requests
 from typing import Dict, List, Set, Optional, Tuple
 from xspace_info import get_space_info
 from xsummary import create_summary
 from xthread import create_thread
 from xquotes import create_quote_thread
+from api_utils import call_deepseek_api
 import tweepy
 import subprocess
 import torch
@@ -31,30 +31,6 @@ try:
         sys.exit(1)
 except ImportError:
     print("\n Warning: validate_env.py not found. Skipping environment validation.")
-
-def call_deepseek_api(messages, max_tokens=1000, temperature=0.7):
-    """Make a call to the DeepSeek API"""
-    headers = {
-        'Authorization': f'Bearer {os.getenv("DEEPSEEK_API_KEY")}',
-        'Content-Type': 'application/json'
-    }
-    
-    data = {
-        'model': 'deepseek-chat',  # or whichever model you want to use
-        'messages': messages,
-        'max_tokens': max_tokens,
-        'temperature': temperature
-    }
-    
-    try:
-        response = requests.post(os.getenv("DEEPSEEK_API_URL"), headers=headers, json=data)
-        response.raise_for_status()  # Raise an exception for bad status codes
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling DeepSeek API: {str(e)}")
-        if response := getattr(e, 'response', None):
-            print(f"Response: {response.text}")
-        raise
 
 def clean_filename(title):
     """Clean filename by removing special characters and limiting length"""

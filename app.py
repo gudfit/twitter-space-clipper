@@ -7,6 +7,7 @@ import subprocess
 from xdownload_space import download_twitter_space
 from transcribe import transcribe_audio
 from xquotes import create_quote_thread
+from api_utils import call_deepseek_api
 import json
 import hashlib
 import shutil
@@ -112,6 +113,8 @@ TRANSCRIPTS_DIR = STORAGE_DIR / "transcripts"
 TRANSCRIPTS_DIR.mkdir(exist_ok=True)
 QUOTES_DIR = STORAGE_DIR / "quotes"
 QUOTES_DIR.mkdir(exist_ok=True)
+SUMMARIES_DIR = STORAGE_DIR / "summaries"
+SUMMARIES_DIR.mkdir(exist_ok=True)
 
 # Create URL history file
 URL_HISTORY_FILE = STORAGE_DIR / "url_history.json"
@@ -276,7 +279,8 @@ def get_storage_paths(space_id: str) -> dict:
     return {
         'audio_path': str(DOWNLOADS_DIR / f"{space_id}.mp3"),
         'transcript_path': str(TRANSCRIPTS_DIR / f"{space_id}.txt"),
-        'quotes_path': str(QUOTES_DIR / f"{space_id}.txt")
+        'quotes_path': str(QUOTES_DIR / f"{space_id}.txt"),
+        'summary_path': str(SUMMARIES_DIR / f"{space_id}.json")
     }
 
 # Authentication
@@ -552,6 +556,72 @@ def load_previous_media(space_id: str):
         return paths
     return None
 
+def generate_summary(transcript: str, quotes: List[str]) -> Dict[str, str]:
+    """Generate a comprehensive summary using both transcript and quotes."""
+    print("\n📝 Generating summary...")
+    
+    try:
+        # First, get a high-level summary from DeepSeek
+        response = call_deepseek_api([
+            {"role": "system", "content": """You are an expert at summarizing content. Create a clear, engaging summary that captures the main points, key insights, and overall narrative. Focus on providing value to someone who hasn't heard the original content."""},
+            {"role": "user", "content": f"""Create a comprehensive summary of this content with two sections:
+
+1. A brief overview (2-3 sentences)
+2. Key points (4-6 bullet points)
+
+Here's the full transcript:
+{transcript}
+
+And here are the key quotes that were identified:
+{chr(10).join(quotes)}"""}
+        ])
+        
+        if not response:
+            return {
+                "overview": "Error generating summary",
+                "key_points": []
+            }
+
+        # Parse the response into overview and key points
+        content = response['content']
+        sections = content.split('\n\n')
+        
+        overview = sections[0].replace('1. ', '').strip()
+        key_points = []
+        
+        # Extract bullet points
+        for section in sections:
+            if 'Key points' in section or '2.' in section:
+                points = re.findall(r'[•\-\*]\s*(.*?)(?=(?:[•\-\*]|\Z))', section, re.DOTALL)
+                if not points:  # Try numbered list if bullets not found
+                    points = re.findall(r'\d+\.\s*(.*?)(?=(?:\d+\.|\Z))', section, re.DOTALL)
+                key_points.extend([p.strip() for p in points if p.strip()])
+
+        return {
+            "overview": overview,
+            "key_points": key_points
+        }
+        
+    except Exception as e:
+        print(f"Error generating summary: {str(e)}")
+        return {
+            "overview": "Error generating summary",
+            "key_points": []
+        }
+
+def save_summary(summary: Dict[str, Any], path: str) -> None:
+    """Save summary to a JSON file."""
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=2)
+
+def load_summary(path: str) -> Optional[Dict[str, Any]]:
+    """Load summary from a JSON file."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
 if not check_password():
     st.stop()  # Do not continue if check_password is not True.
 
@@ -560,7 +630,7 @@ st.title("🎙️ LinkToQuote")
 st.write("Generate quotes and clips from any media url -  no listening required!")
 
 # Create tabs for main content and sidebar content
-main_tab, logs_tab, history_tab, help_tab = st.tabs(["🎯 Main", "🔍 Logs", "📚 History", "❓ Help"])
+main_tab, summary_tab, logs_tab, history_tab, help_tab = st.tabs(["🎯 Main", "📝 Summary", "🔍 Logs", "📚 History", "❓ Help"])
 
 with main_tab:
     # Load existing media files and their URLs
@@ -762,6 +832,60 @@ with main_tab:
                         mime="text/plain"
                     )
 
+with summary_tab:
+    st.subheader("📝 Content Summary")
+    
+    if st.session_state.processing_complete and st.session_state.current_space_id:
+        paths = get_storage_paths(st.session_state.current_space_id)
+        
+        if os.path.exists(paths['transcript_path']) and os.path.exists(paths['quotes_path']):
+            # Check if we already have a summary
+            existing_summary = load_summary(paths['summary_path'])
+            
+            # Add generate/regenerate button
+            button_text = "🔄 Regenerate Summary" if existing_summary else "🔄 Generate Summary"
+            if st.button(button_text):
+                with st.spinner("Generating summary..."):
+                    # Read transcript and quotes
+                    with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                        transcript = f.read()
+                    quotes = read_quotes(paths['quotes_path'])
+                    
+                    summary = generate_summary(transcript, quotes)
+                    
+                    if summary['overview'] != "Error generating summary":
+                        # Save the summary
+                        save_summary(summary, paths['summary_path'])
+                        existing_summary = summary
+                    else:
+                        st.error("Failed to generate summary. Please try again.")
+            
+            # Display existing summary if available
+            if existing_summary:
+                # Display overview
+                st.markdown("### Overview")
+                st.write(existing_summary['overview'])
+                
+                # Display key points
+                st.markdown("### Key Points")
+                for point in existing_summary['key_points']:
+                    st.markdown(f"• {point}")
+                
+                # Add download button for summary
+                summary_text = f"Overview:\n{existing_summary['overview']}\n\nKey Points:\n"
+                summary_text += '\n'.join(f"• {point}" for point in existing_summary['key_points'])
+                
+                st.download_button(
+                    "⬇️ Download Summary",
+                    summary_text,
+                    file_name=f"summary_{st.session_state.current_space_id[:8]}.txt",
+                    mime="text/plain"
+                )
+        else:
+            st.warning("Please process content first to generate a summary.")
+    else:
+        st.info("Process content in the Main tab to generate a summary.")
+
 with logs_tab:
     st.markdown("### 🔍 Processing Logs")
     
@@ -895,11 +1019,12 @@ with history_tab:
                         details = {
                             "Audio": os.path.exists(paths['audio_path']),
                             "Transcript": os.path.exists(paths['transcript_path']),
-                            "Quotes": os.path.exists(paths['quotes_path'])
+                            "Quotes": os.path.exists(paths['quotes_path']),
+                            "Summary": os.path.exists(paths['summary_path'])
                         }
                         
                         # Create status indicators
-                        status_cols = st.columns(3)
+                        status_cols = st.columns(4)
                         for i, (file_type, exists) in enumerate(details.items()):
                             with status_cols[i]:
                                 icon = "✅" if exists else "❌"
