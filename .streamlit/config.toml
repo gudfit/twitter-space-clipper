@@ -9,3 +9,5 @@ font = "sans serif"
 maxUploadSize = 200  # Allow larger file uploads (in MB)
 enableXsrfProtection = true
 enableCORS = false 
+address = "127.0.0.1"
+port = 8501
