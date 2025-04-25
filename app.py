@@ -563,16 +563,15 @@ def generate_summary(transcript: str, quotes: List[str]) -> Dict[str, str]:
     try:
         # First, get a high-level summary from DeepSeek
         response = call_deepseek_api([
-            {"role": "system", "content": """You are an expert at summarizing content. Create a clear, engaging summary that captures the main points, key insights, and overall narrative. Focus on providing value to someone who hasn't heard the original content."""},
-            {"role": "user", "content": f"""Create a comprehensive summary of this content with two sections:
+            {"role": "system", "content": """You are an expert at summarizing content. Create a clear, engaging summary that captures the main points and key insights. Focus on providing value to someone who hasn't heard the original content. Keep formatting minimal and clean."""},
+            {"role": "user", "content": f"""Please summarize this content with:
+1. A brief overview paragraph (2-3 sentences)
+2. 4-6 key points as simple bullet points
 
-1. A brief overview (2-3 sentences)
-2. Key points (4-6 bullet points)
-
-Here's the full transcript:
+Here's the transcript:
 {transcript}
 
-And here are the key quotes that were identified:
+And here are some key quotes that were identified:
 {chr(10).join(quotes)}"""}
         ])
         
@@ -584,18 +583,19 @@ And here are the key quotes that were identified:
 
         # Parse the response into overview and key points
         content = response['content']
+        
+        # Split into sections and clean up
         sections = content.split('\n\n')
+        overview = sections[0].strip()
         
-        overview = sections[0].replace('1. ', '').strip()
+        # Extract bullet points (looking for lines starting with • or -)
         key_points = []
-        
-        # Extract bullet points
-        for section in sections:
-            if 'Key points' in section or '2.' in section:
-                points = re.findall(r'[•\-\*]\s*(.*?)(?=(?:[•\-\*]|\Z))', section, re.DOTALL)
-                if not points:  # Try numbered list if bullets not found
-                    points = re.findall(r'\d+\.\s*(.*?)(?=(?:\d+\.|\Z))', section, re.DOTALL)
-                key_points.extend([p.strip() for p in points if p.strip()])
+        for line in content.split('\n'):
+            line = line.strip()
+            if line.startswith('•') or line.startswith('-'):
+                point = line.lstrip('•- ').strip()
+                if point:
+                    key_points.append(point)
 
         return {
             "overview": overview,
