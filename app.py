@@ -481,15 +481,15 @@ if not check_password():
     st.stop()  # Do not continue if check_password is not True.
 
 # Main app
-st.title("🎙️ Twitter Space Content Generator")
-st.write("Generate quotes and clips from Twitter Spaces - no listening required!")
+st.title("🎙️ LinkToQuote")
+st.write("Generate quotes and clips from any media url -  no listening required!")
 
 # Create two columns - main content and logs
 main_col, log_col = st.columns([2, 1])
 
 with main_col:
     # URL input
-    space_url = st.text_input("Paste Twitter Space URL:", placeholder="https://twitter.com/i/spaces/...")
+    space_url = st.text_input("Paste Media URL:", placeholder="https://twitter.com/i/spaces/...")
 
     if space_url:
         space_id = get_space_id(space_url)
