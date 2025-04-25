@@ -96,6 +96,12 @@ if 'current_fragment' not in st.session_state:
     st.session_state.current_fragment = 0
 if 'regenerating_quotes' not in st.session_state:
     st.session_state.regenerating_quotes = False
+if 'selected_media' not in st.session_state:
+    st.session_state.selected_media = None
+if 'url_history' not in st.session_state:
+    st.session_state.url_history = {}
+if 'loaded_space_id' not in st.session_state:
+    st.session_state.loaded_space_id = None
 
 # Create persistent storage directories
 STORAGE_DIR = Path("storage")
@@ -106,6 +112,34 @@ TRANSCRIPTS_DIR = STORAGE_DIR / "transcripts"
 TRANSCRIPTS_DIR.mkdir(exist_ok=True)
 QUOTES_DIR = STORAGE_DIR / "quotes"
 QUOTES_DIR.mkdir(exist_ok=True)
+
+# Create URL history file
+URL_HISTORY_FILE = STORAGE_DIR / "url_history.json"
+if not URL_HISTORY_FILE.exists():
+    with open(URL_HISTORY_FILE, 'w') as f:
+        json.dump({}, f)
+
+def load_url_history():
+    """Load URL history from file."""
+    try:
+        with open(URL_HISTORY_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_url_history(space_id: str, url: str):
+    """Save URL to history."""
+    history = load_url_history()
+    history[space_id] = url
+    with open(URL_HISTORY_FILE, 'w') as f:
+        json.dump(history, f)
+    st.session_state.url_history = history
+
+def get_url_from_history(space_id: str) -> str:
+    """Get original URL for a space_id."""
+    if not hasattr(st.session_state, 'url_history'):
+        st.session_state.url_history = load_url_history()
+    return st.session_state.url_history.get(space_id, "Unknown URL")
 
 class ProgressCallback:
     def __init__(self, progress_bar):
@@ -503,6 +537,21 @@ def chunk_transcript(transcript: str, chunk_size: int = 50000) -> List[str]:
     
     return chunks
 
+def load_previous_media(space_id: str):
+    """Load previously processed media and set up the interface."""
+    # Set session state
+    st.session_state.current_space_id = space_id
+    st.session_state.processing_complete = True
+    st.session_state.loaded_space_id = space_id
+    
+    # Get paths
+    paths = get_storage_paths(space_id)
+    
+    # Verify all files exist
+    if all(os.path.exists(p) for p in paths.values()):
+        return paths
+    return None
+
 if not check_password():
     st.stop()  # Do not continue if check_password is not True.
 
@@ -510,17 +559,50 @@ if not check_password():
 st.title("🎙️ LinkToQuote")
 st.write("Generate quotes and clips from any media url -  no listening required!")
 
-# Create two columns - main content and logs
-main_col, log_col = st.columns([2, 1])
+# Create tabs for main content and sidebar content
+main_tab, logs_tab, history_tab, help_tab = st.tabs(["🎯 Main", "🔍 Logs", "📚 History", "❓ Help"])
 
-with main_col:
-    # URL input
-    space_url = st.text_input("Paste Media URL:", placeholder="https://x.com/i/status/1915404626754494957")
+with main_tab:
+    # Load existing media files and their URLs
+    media_files = list(DOWNLOADS_DIR.glob("*.mp3")) if DOWNLOADS_DIR.exists() else []
+    url_history = load_url_history()
+    
+    # Create two columns for input methods
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        # URL input
+        space_url = st.text_input("Paste Media URL:", placeholder="https://x.com/i/status/1915404626754494957")
+    
+    with col2:
+        if media_files:
+            # Create dropdown for previous URLs
+            options = ["New URL"]
+            options.extend([f"{Path(f).stem} - {url_history.get(Path(f).stem, 'Unknown URL')}" 
+                          for f in media_files])
+            
+            selected_option = st.selectbox(
+                "Or select previous:",
+                options,
+                index=0,
+                help="Select a previously processed media file"
+            )
+            
+            if selected_option != "New URL":
+                space_id = selected_option.split(" - ")[0]
+                space_url = url_history.get(space_id, "")
+                if st.button("📂 Load Selected"):
+                    paths = load_previous_media(space_id)
+                    if paths:
+                        st.rerun()
 
-    if space_url:
-        space_id = get_space_id(space_url)
+    # Handle URL input or loaded media
+    if space_url or st.session_state.loaded_space_id:
+        space_id = get_space_id(space_url) if space_url else st.session_state.loaded_space_id
         
-        if space_id != st.session_state.current_space_id:
+        # Save URL to history when processing new media
+        if space_url and space_id != st.session_state.current_space_id:
+            save_url_history(space_id, space_url)
             st.session_state.processing_complete = False
             st.session_state.current_space_id = space_id
             st.session_state.download_progress = 0
@@ -540,14 +622,19 @@ with main_col:
                     status.update(label="Error!", state="error")
                     st.session_state.processing_complete = False
 
-        # If processing is complete, show results
+        # If processing is complete or media was loaded, show results
         if st.session_state.processing_complete:
             process_result = get_storage_paths(space_id)
             
+            # Show original URL for loaded content
+            if st.session_state.loaded_space_id:
+                original_url = get_url_from_history(space_id)
+                st.info(f"🔗 Loaded content from: {original_url}")
+
             # Display tabs for different outputs
-            tab1, tab2, tab3 = st.tabs(["📝 Quotes", "🎵 Audio", "📄 Transcript"])
+            content_tab1, content_tab2, content_tab3 = st.tabs(["📝 Quotes", "🎵 Audio", "📄 Transcript"])
             
-            with tab1:
+            with content_tab1:
                 st.subheader("Generated Quotes")
                 if os.path.exists(process_result['quotes_path']):
                     # Add regenerate button at the top
@@ -616,7 +703,7 @@ with main_col:
                     else:
                         st.warning("No quotes found in the file. Try regenerating the quotes.")
             
-            with tab2:
+            with content_tab2:
                 st.subheader("Audio")
                 if os.path.exists(process_result['audio_path']):
                     audio_size = os.path.getsize(process_result['audio_path']) / (1024 * 1024)  # MB
@@ -630,7 +717,7 @@ with main_col:
                             mime="audio/mpeg"
                         )
             
-            with tab3:
+            with content_tab3:
                 st.subheader("Transcript")
                 if os.path.exists(process_result['transcript_path']):
                     with open(process_result['transcript_path'], 'r') as f:
@@ -675,7 +762,7 @@ with main_col:
                         mime="text/plain"
                     )
 
-with log_col:
+with logs_tab:
     st.markdown("### 🔍 Processing Logs")
     
     # Create an expander for detailed logs with word wrapping
@@ -699,10 +786,138 @@ with log_col:
                 st.code(''.join(recent_logs), language='text')
         except Exception as e:
             st.warning("No logs available yet")
-    
 
-# Sidebar with instructions and storage info
-with st.sidebar:
+with history_tab:
+    st.markdown("### 📚 Previously Downloaded Media")
+    
+    # List all downloaded media
+    if DOWNLOADS_DIR.exists():
+        media_files = list(DOWNLOADS_DIR.glob("*.mp3"))
+        if media_files:
+            # Add search/filter box
+            search = st.text_input("🔍 Search media files", 
+                                 help="Filter by URL or ID")
+            
+            # Create a radio selection for media files
+            media_options = {}
+            for media_file in media_files:
+                space_id = media_file.stem
+                original_url = get_url_from_history(space_id)
+                size_mb = media_file.stat().st_size / (1024 * 1024)
+                
+                # Create a formatted label with URL preview
+                url_preview = original_url
+                if len(url_preview) > 60:
+                    url_preview = url_preview[:57] + "..."
+                
+                label = f"📁 {space_id}\n💾 {size_mb:.1f} MB\n🔗 {url_preview}"
+                media_options[label] = str(media_file)
+            
+            # Filter options based on search
+            if search:
+                media_options = {k: v for k, v in media_options.items() 
+                               if search.lower() in k.lower() or 
+                               search.lower() in get_url_from_history(Path(v).stem).lower()}
+            
+            if media_options:
+                selected = st.radio(
+                    "Select a media file to manage:",
+                    options=list(media_options.keys()),
+                    index=None,
+                    label_visibility="collapsed"
+                )
+                
+                if selected:
+                    selected_path = Path(media_options[selected])
+                    space_id = selected_path.stem
+                    
+                    # Create a nice looking container for file details
+                    with st.container():
+                        st.markdown("---")
+                        st.markdown("#### Selected File Details")
+                        
+                        # Show full URL in an info box
+                        original_url = get_url_from_history(space_id)
+                        st.info(f"🔗 Original URL:\n{original_url}")
+                        
+                        # Show action buttons in a row
+                        col1, col2, col3 = st.columns([1, 1, 1])
+                        with col1:
+                            if st.button("📂 Load", key="load_selected",
+                                       help="Load this media in the main view"):
+                                st.session_state.current_space_id = space_id
+                                st.session_state.processing_complete = True
+                                st.rerun()
+                        
+                        with col2:
+                            # Download button
+                            with open(selected_path, 'rb') as f:
+                                st.download_button(
+                                    "⬇️ Download",
+                                    f,
+                                    file_name=selected_path.name,
+                                    mime="audio/mpeg",
+                                    help="Download the audio file"
+                                )
+                        
+                        with col3:
+                            # Delete button with confirmation
+                            if st.button("🗑️ Delete", key="delete_media",
+                                       help="Delete all files associated with this media"):
+                                if st.button("⚠️ Confirm Delete", key="confirm_delete"):
+                                    try:
+                                        # Delete all associated files
+                                        paths = get_storage_paths(space_id)
+                                        for path in paths.values():
+                                            if os.path.exists(path):
+                                                os.remove(path)
+                                        st.success(f"Deleted all files for {selected_path.stem}")
+                                        # Clear session state if the current media was deleted
+                                        if space_id == st.session_state.current_space_id:
+                                            st.session_state.current_space_id = None
+                                            st.session_state.processing_complete = False
+                                        # Remove from URL history
+                                        history = load_url_history()
+                                        if space_id in history:
+                                            del history[space_id]
+                                            with open(URL_HISTORY_FILE, 'w') as f:
+                                                json.dump(history, f)
+                                        time.sleep(1)  # Give time for the success message
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error deleting files: {str(e)}")
+                        
+                        # Show file status
+                        st.markdown("#### File Status")
+                        paths = get_storage_paths(space_id)
+                        
+                        # Check which associated files exist
+                        details = {
+                            "Audio": os.path.exists(paths['audio_path']),
+                            "Transcript": os.path.exists(paths['transcript_path']),
+                            "Quotes": os.path.exists(paths['quotes_path'])
+                        }
+                        
+                        # Create status indicators
+                        status_cols = st.columns(3)
+                        for i, (file_type, exists) in enumerate(details.items()):
+                            with status_cols[i]:
+                                icon = "✅" if exists else "❌"
+                                st.markdown(f"**{icon} {file_type}**")
+                                if exists:
+                                    size = Path(paths[file_type.lower() + '_path']).stat().st_size / 1024
+                                    if size < 1024:
+                                        st.caption(f"{size:.1f} KB")
+                                    else:
+                                        st.caption(f"{size/1024:.1f} MB")
+            else:
+                st.warning("No media files match your search.")
+        else:
+            st.info("No media files downloaded yet.")
+    else:
+        st.warning("Downloads directory not found.")
+
+with help_tab:
     st.subheader("📖 Instructions")
     st.write("""
     1. Paste media URL
