@@ -64,7 +64,7 @@ def check_ffmpeg():
 
 # Configure Streamlit page
 st.set_page_config(
-    page_title="Twitter Space Content Generator",
+    page_title="LinkToQuotes",
     page_icon="🎙️",
     layout="wide"
 )

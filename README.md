@@ -10,14 +10,14 @@ Extract audio clips from Twitter Spaces based on quotes and timestamps.
 - Web interface for easy processing and quote management
 
 ## Requirements
-- Python 3.11.x
+- Python 3.10 or higher
 - ffmpeg for audio processing
 - DeepSeek API credentials
 
 ## Installation
 1. Create a virtual environment:
 ```bash
-python3.11 -m venv venv
+python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
@@ -26,11 +26,17 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-3. Set up environment variables in `.env`:
+3. Set up environment variables in `.streamlit/secrets.toml`:
+```toml
+# Authentication
+password = "your_password"  # Password for web interface access
+
+# DeepSeek API credentials
+DEEPSEEK_API_KEY = "your_key"
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 ```
-DEEPSEEK_API_KEY=your_key
-DEEPSEEK_API_URL=your_url
-```
+
+Note: The `.streamlit/secrets.toml` file is required for the web interface. For command line usage only, you can alternatively use a `.env` file with the same DeepSeek API credentials.
 
 ## Usage
 
