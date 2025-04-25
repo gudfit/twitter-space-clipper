@@ -1,0 +1,11 @@
+[theme]
+primaryColor = "#1DA1F2"  # Twitter blue
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8F9FA"
+textColor = "#262730"
+font = "sans serif"
+
+[server]
+maxUploadSize = 200  # Allow larger file uploads (in MB)
+enableXsrfProtection = true
+enableCORS = false 

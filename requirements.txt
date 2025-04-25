@@ -1,8 +1,16 @@
+# PyTorch with CPU optimizations
 --extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.1.1
+
+# Core dependencies
+streamlit>=1.31.0
 yt-dlp>=2023.11.16
 openai-whisper>=20231117
 requests>=2.31.0
 tweepy>=4.14.0
-torch>=2.1.1
 emoji>=2.8.0
 python-dotenv>=1.0.0
+
+# Streamlit enhancements
+watchdog>=3.0.0  # For better file handling in Streamlit
+streamlit-extras>=0.3.6  # Additional Streamlit components

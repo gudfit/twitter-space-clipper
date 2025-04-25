@@ -30,6 +30,7 @@ ENV/
 
 # Environment variables
 .env
+.streamlit/secrets.toml
 
 # IDE
 .idea/
@@ -53,3 +54,6 @@ Thumbs.db
 *.ogg
 *.mp4
 *.temp
+
+storage/
+*.log

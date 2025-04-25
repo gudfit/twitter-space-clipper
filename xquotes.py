@@ -13,6 +13,12 @@ DEEPSEEK_API_URL = os.getenv('DEEPSEEK_API_URL')
 
 def call_deepseek_api(messages: List[Dict]) -> Dict:
     """Call DeepSeek API with retry logic"""
+    print("\n🔄 Preparing DeepSeek API call...")
+    print(f"Model: deepseek-chat")
+    print(f"Max tokens: 2000")
+    print(f"Temperature: 0.7")
+    print(f"Message count: {len(messages)}")
+    
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
@@ -26,11 +32,35 @@ def call_deepseek_api(messages: List[Dict]) -> Dict:
     }
     
     try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data)
+        # Add /chat/completions to the API endpoint
+        api_url = DEEPSEEK_API_URL.rstrip('/') + '/chat/completions'
+        print(f"\n📡 Sending request to: {api_url}")
+        print(f"System prompt length: {len(messages[0]['content'])}")
+        print(f"User prompt length: {len(messages[1]['content'])}")
+        
+        response = requests.post(api_url, headers=headers, json=data)
+        print(f"\n📥 Response received (status: {response.status_code})")
+        
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        
+        # Log token usage if available
+        if 'usage' in result:
+            usage = result['usage']
+            print(f"\n📊 Token usage:")
+            print(f"- Prompt tokens: {usage.get('prompt_tokens', 'N/A')}")
+            print(f"- Completion tokens: {usage.get('completion_tokens', 'N/A')}")
+            print(f"- Total tokens: {usage.get('total_tokens', 'N/A')}")
+        
+        message = result['choices'][0]['message']
+        print(f"\n✅ Successfully extracted response (length: {len(message['content'])} chars)")
+        return message
+        
     except Exception as e:
-        print(f"Error calling DeepSeek API: {str(e)}")
+        print(f"\n❌ Error calling DeepSeek API: {str(e)}")
+        if response := getattr(e, 'response', None):
+            print(f"Response status: {response.status_code}")
+            print(f"Response body: {response.text}")
         return None
 
 def clean_quote(quote: str) -> str:
@@ -192,23 +222,37 @@ Format each quote on a new line, starting with the speaker's handle."""},
 
 def create_quote_thread(transcript: str, space_info: Dict) -> List[str]:
     """Create a thread of the best quotes from the Space"""
+    print("\n🎯 Starting quote generation process...")
+    print(f"Transcript length: {len(transcript)} characters")
+    print(f"Space info: {space_info}")  # Log space info for debugging
+    
     if not space_info or not transcript:
+        print("❌ Missing required data (space_info or transcript)")
         return []
     
     # Extract quotes for each speaker
     quotes = []
-    all_speakers = [space_info['host']] + space_info['speakers'] if space_info.get('host') else space_info.get('speakers', [])
+    all_speakers = [space_info.get('host')] + space_info.get('speakers', []) if space_info.get('host') else space_info.get('speakers', [])
     
-    for speaker in all_speakers:
-        if not speaker:
-            continue
-        speaker_quotes = extract_speaker_quotes(transcript, {'speaker': speaker, 'space_info': space_info})
-        if speaker_quotes:
-            quotes.extend(speaker_quotes)
+    if all_speakers:
+        print(f"\n👥 Found {len(all_speakers)} speakers")
+        for speaker in all_speakers:
+            print(f"\n🎤 Processing speaker: {speaker}")
+            if not speaker:
+                print("⚠️ Skipping empty speaker name")
+                continue
+            speaker_quotes = extract_speaker_quotes(transcript, {'speaker': speaker, 'space_info': space_info})
+            if speaker_quotes:
+                print(f"✅ Generated {len(speaker_quotes)} quotes for {speaker}")
+                quotes.extend(speaker_quotes)
+            else:
+                print(f"⚠️ No quotes generated for {speaker}")
+    else:
+        print("⚠️ No speakers found in space_info")
     
     # If no quotes found, try extracting without speaker attribution
     if not quotes:
-        print("\n🔄 Trying to extract general quotes without speaker attribution...")
+        print("\n🔄 No speaker quotes found, trying general quote extraction...")
         response = call_deepseek_api([
             {"role": "system", "content": """You are an expert at identifying impactful and quotable moments from conversations. Extract the most interesting, insightful, or memorable quotes that would work well on Twitter. Each quote should:
 1. Be self-contained and meaningful on its own
@@ -217,13 +261,28 @@ def create_quote_thread(transcript: str, space_info: Dict) -> List[str]:
             {"role": "user", "content": f"Extract the best quotes from this transcript:\n\n{transcript}"}
         ])
         
-        if response:
-            raw_quotes = response['choices'][0]['message']['content'].strip().split('\n')
+        if response and response.get('content'):
+            print("\n📝 Processing DeepSeek response...")
+            raw_quotes = response['content'].strip().split('\n')
+            print(f"Found {len(raw_quotes)} raw quotes")
+            
             for quote in raw_quotes:
                 quote = clean_quote(quote)
                 if quote and len(quote) <= 240:
                     quotes.append(quote)
+                    print(f"✅ Added quote ({len(quote)} chars): {quote[:50]}...")
+                else:
+                    if not quote:
+                        print("⚠️ Skipping empty quote")
+                    else:
+                        print(f"⚠️ Skipping quote - too long ({len(quote)} chars)")
+            
+            print(f"\n✨ Added {len(quotes)} valid quotes")
+        else:
+            print("❌ Failed to generate general quotes - invalid or empty response")
+            print(f"Response: {response}")
     
+    print(f"\n🎉 Quote generation complete! Generated {len(quotes)} total quotes")
     return quotes
 
 def format_quote_tweet(quote: str, speaker: str, context: str = '', speaker_info: Dict = None) -> str:
