@@ -1,3 +1,7 @@
+---
+description: Prefer Simple, Robust Solutions
+globs: **/*.{py,py}
+---
 # Prefer Simple, Robust Solutions
 
 ## Rule Description

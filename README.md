@@ -2,12 +2,68 @@
 
 Extract audio clips from any media source based on quotes and timestamps. Supports media, YouTube videos, podcasts, and other online media.
 
+## Project Structure
+```
+twitter-space-clipper/
+├── run.sh               # Run the application
+├── requirements.txt    # Python dependencies
+├── app/               # Main application code
+│   ├── __init__.py   # Marks directory as a Python package
+│   ├── main.py       # Main Streamlit app with UI components
+├── core/            # Core functionality
+│   ├── __init__.py  # Marks directory as a Python package
+│   ├── download.py  # Media download functionality
+│   ├── transcribe.py # Audio transcription
+│   ├── quotes.py    # Quote generation
+│   ├── summary.py   # Summary generation
+│   └── processor.py # Main processing pipeline
+├── utils/          # Shared utilities
+│   ├── __init__.py # Marks directory as a Python package
+│   ├── api.py     # API utilities
+│   └── file_utils.py # File handling utilities
+├── .streamlit/    # Streamlit configuration
+│   ├── config.toml  # Streamlit app configuration
+│   └── secrets.toml # API keys and secrets (gitignored)
+├── storage/      # Data storage (gitignored)
+│   ├── downloads/    # Downloaded media
+│   ├── transcripts/  # Generated transcripts
+│   ├── quotes/      # Generated quotes
+│   └── summaries/   # Generated summaries
+└── docs/          # Documentation
+```
+
+### Understanding the Structure
+- **Root Directory**: Contains user-facing scripts and configuration
+  - `run.sh`: Start the application
+  - `requirements.txt`: Python package dependencies
+  
+- **`app/`**: Main application code
+  - Uses `__init__.py` to mark it as a Python package
+  - Contains the Streamlit interface and UI components
+  
+- **`core/`**: Core business logic
+  - Each module handles a specific functionality
+  - Independent of the UI layer
+  
+- **`utils/`**: Shared utilities
+  - Common functionality used across the application
+  
+- **`.streamlit/`**: Streamlit configuration
+  - `config.toml`: App theme and server settings
+  - `secrets.toml`: API keys and authentication (gitignored)
+  
+- **`storage/`**: Data storage
+  - Organized by content type
+  - Automatically created as needed
+
 ## Features
 - Download media from various sources using yt-dlp
 - Transcribe audio using OpenAI's Whisper
 - Generate quotes from transcripts using DeepSeek AI
-- Create audio clips for specific quotes
-- Web interface for easy processing and quote management
+- Generate summaries using DeepSeek AI
+- Web interface for easy processing and content management
+- Password protection for the web interface
+- History tracking for processed media
 
 ## Requirements
 - Python 3.10 or higher
@@ -15,63 +71,70 @@ Extract audio clips from any media source based on quotes and timestamps. Suppor
 - DeepSeek API credentials
 
 ## Installation
-1. Create a virtual environment:
+
+1. Set up the environment:
 ```bash
+# Clone the repository
+git clone <repository-url>
+cd twitter-space-clipper
+
+# Create and activate virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
 
-2. Install dependencies:
-```bash
+# Install dependencies
 pip install -r requirements.txt
+
+# Install ffmpeg if not already installed
+# Ubuntu/Debian: sudo apt-get install ffmpeg
+# macOS: brew install ffmpeg
+# Windows: Download from https://ffmpeg.org/download.html
 ```
 
-3. Set up environment variables in `.streamlit/secrets.toml`:
+2. Configure Streamlit:
+
+Create `.streamlit/secrets.toml` with the following content:
 ```toml
-# Authentication
-password = "your_password"  # Password for web interface access
+# App password
+password = "your_app_password"
 
 # DeepSeek API credentials
-DEEPSEEK_API_KEY = "your_key"
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
+DEEPSEEK_API_KEY = "your_deepseek_api_key"
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/"
 ```
 
-Note: The `.streamlit/secrets.toml` file is required for the web interface. For command line usage only, you can alternatively use a `.env` file with the same DeepSeek API credentials.
-
-## Usage
-
-### Web Interface (Recommended)
-Run the Streamlit app:
+3. Run the application:
 ```bash
 ./run.sh  # On Windows: run.bat
 ```
-Then open your browser to the displayed URL (typically http://localhost:8501)
 
-### Command Line Interface
-For advanced users, you can also use the command line tools:
+## Usage
 
-1. Download and transcribe media:
-```bash
-python xspace.py "URL_TO_MEDIA"
-```
-
-2. Extract audio clips from quotes:
-```bash
-python xclips.py path/to/quotes.txt [--audio audio_file] [--output output_dir]
-```
-
-The clips will be saved in a 'clips' subdirectory by default.
+1. Open your browser to the displayed URL (typically http://localhost:8501)
+2. Enter the password configured in `secrets.toml`
+3. Paste a media URL or select from previously processed content
+4. Wait for processing to complete
+5. Access generated content:
+   - Quotes with copy buttons
+   - Full transcript
+   - Audio download
+   - Content summary
+   - History of processed media
 
 ## Supported Media Sources
-- media
 - YouTube videos
 - Podcasts
 - Any audio/video source supported by yt-dlp
 
-## Scripts
-- `app.py` - Streamlit web interface
-- `xspace.py` - Download and process media content
-- `xclips.py` - Create audio clips from quotes
-- `xquotes.py` - Generate quotes from transcripts using DeepSeek AI
-- `transcribe.py` - Transcribe audio using Whisper
-- `xdownload_space.py` - Download media using yt-dlp
+## Core Modules
+- `core/processor.py` - Main processing pipeline
+- `core/download.py` - Media download functionality
+- `core/transcribe.py` - Audio transcription
+- `core/quotes.py` - Quote generation
+- `core/summary.py` - Summary generation
+
+## Security Note
+- The app is password protected via Streamlit secrets
+- API keys are stored securely in `secrets.toml`
+- Sensitive files are gitignored
+- All user uploads are validated and sanitized

@@ -4,10 +4,6 @@ from pathlib import Path
 import sys
 import tempfile
 import subprocess
-from xdownload_space import download_twitter_space
-from transcribe import transcribe_audio
-from xquotes import create_quote_thread
-from api_utils import call_deepseek_api
 import json
 import hashlib
 import shutil
@@ -17,6 +13,14 @@ from typing import Optional, Dict, Any, List
 import time
 import logging
 from streamlit_extras.stylable_container import stylable_container
+
+# Import core functionality
+from core.download import download_twitter_space
+from core.transcribe import transcribe_audio
+from core.quotes import create_quote_thread
+from core.summary import generate_summary, save_summary, load_summary
+from core.processor import process_space, get_space_id, get_storage_paths, regenerate_quotes
+from utils.api import call_deepseek_api
 
 # Configure logging
 logging.basicConfig(
@@ -144,67 +148,57 @@ def get_url_from_history(space_id: str) -> str:
         st.session_state.url_history = load_url_history()
     return st.session_state.url_history.get(space_id, "Unknown URL")
 
-class ProgressCallback:
-    def __init__(self, progress_bar):
-        self.progress_bar = progress_bar
-        self.total_fragments = 0
-        self.downloaded_fragments = 0
+class StreamlitProgressCallback:
+    """Progress callback that updates Streamlit UI."""
+    def __init__(self, container):
+        self.container = container
+        self.progress_bar = None
+        
+    def __call__(self, stage: str, progress: float, status: str):
+        if not self.progress_bar:
+            self.progress_bar = self.container.progress(0)
+            
+        # Update progress bar with emoji indicators for each stage
+        stage_emoji = {
+            "download": "⬇️",
+            "transcribe": "🎯",
+            "quotes": "✍️",
+            "summary": "📝",
+            "complete": "✅",
+            "error": "❌"
+        }
+        
+        emoji = stage_emoji.get(stage, "")
+        # Update progress bar with emoji
+        self.progress_bar.progress(progress, f"{emoji} {stage.title()}: {status}")
+        
+        # Only show completion/error messages outside progress bar
+        if stage == "complete":
+            self.container.success("✅ Processing complete!")
+        elif stage == "error":
+            self.container.error(f"❌ Error: {status}")
 
-    def format_bytes(self, bytes_num: float) -> str:
-        """Format bytes to human readable string."""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if bytes_num < 1024:
-                return f"{bytes_num:.1f} {unit}"
-            bytes_num /= 1024
-        return f"{bytes_num:.1f} TB"
-
-    def format_eta(self, seconds: float) -> str:
-        """Format ETA seconds to human readable string."""
-        if seconds < 60:
-            return f"{seconds:.0f}s"
-        elif seconds < 3600:
-            minutes = seconds / 60
-            return f"{minutes:.0f}m"
+def process_space_with_ui(url: str, _progress_container) -> dict:
+    """Process media URL with Streamlit UI updates."""
+    try:
+        log_processing_step("Space processing", "started", f"URL: {url}")
+        
+        # Create progress callback
+        progress_callback = StreamlitProgressCallback(_progress_container)
+        
+        # Process the space
+        paths = process_space(url, str(STORAGE_DIR), progress_callback)
+        
+        if paths:
+            st.session_state.processing_complete = True
+            return paths
         else:
-            hours = seconds / 3600
-            minutes = (seconds % 3600) / 60
-            return f"{hours:.0f}h {minutes:.0f}m"
-
-    def __call__(self, d: Dict[str, Any]) -> None:
-        if d['status'] == 'downloading':
-            # Extract total fragments if not already set
-            if not self.total_fragments and 'total_fragments' in d:
-                self.total_fragments = d['total_fragments']
-                st.session_state.total_fragments = self.total_fragments
-
-            # Update progress based on fragment number
-            if 'fragment_index' in d:
-                self.downloaded_fragments = d['fragment_index'] + 1
-                st.session_state.current_fragment = self.downloaded_fragments
-                if self.total_fragments:
-                    progress = self.downloaded_fragments / self.total_fragments
-                    status_text = f"Downloading... ({self.downloaded_fragments}/{self.total_fragments} fragments)"
-                    
-                    # Add speed and ETA if available
-                    if 'speed' in d and d['speed'] is not None:
-                        status_text += f" | {self.format_bytes(d['speed'])}/s"
-                    if 'eta' in d and d['eta'] is not None:
-                        status_text += f" | ETA: {self.format_eta(d['eta'])}"
-                    
-                    self.progress_bar.progress(progress, status_text)
-
-            # Update progress based on downloaded bytes
-            elif 'downloaded_bytes' in d and 'total_bytes_estimate' in d:
-                progress = d['downloaded_bytes'] / d['total_bytes_estimate']
-                status_text = f"Downloading... {d['_percent_str']}"
-                
-                # Add speed and ETA if available
-                if 'speed' in d and d['speed'] is not None:
-                    status_text += f" | {self.format_bytes(d['speed'])}/s"
-                if 'eta' in d and d['eta'] is not None:
-                    status_text += f" | ETA: {self.format_eta(d['eta'])}"
-                
-                self.progress_bar.progress(progress, status_text)
+            st.error("Processing failed. Check the logs for details.")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return None
 
 def download_with_progress(url: str, output_dir: str, progress_bar) -> Optional[str]:
     """Download media with progress tracking."""
@@ -310,110 +304,6 @@ def check_password():
     else:
         # Password correct.
         return True
-
-@st.cache_data(show_spinner=False)
-def process_space(url: str, _progress_container) -> dict:
-    """Process media URL and return paths to generated files."""
-    try:
-        log_processing_step("Space processing", "started", f"URL: {url}")
-        space_id = get_space_id(url)
-        paths = get_storage_paths(space_id)
-        
-        if all(os.path.exists(p) for p in paths.values()):
-            log_processing_step("Space processing", "skipped", "Files already exist")
-            st.session_state.processing_complete = True  # Set processing complete since files exist
-            return paths
-
-        # Download progress bar
-        if not os.path.exists(paths['audio_path']):
-            with _progress_container:
-                log_processing_step("Audio download", "started")
-                st.write("⬇️ Downloading Space recording...")
-                download_progress = st.progress(0, "Preparing download...")
-                downloaded_file = download_with_progress(url, str(DOWNLOADS_DIR), download_progress)
-                
-                if not downloaded_file:
-                    log_processing_step("Audio download", "failed")
-                    raise Exception("Failed to download Space")
-                
-                log_processing_step("Audio download", "completed", f"File: {downloaded_file}")
-                
-                # If the file isn't already MP3, we'll need to convert it later
-                if not downloaded_file.endswith('.mp3'):
-                    st.warning("File downloaded but needs conversion to MP3. Install ffmpeg and try again.")
-                    paths['audio_path'] = downloaded_file  # Store the temporary path
-                else:
-                    shutil.move(downloaded_file, paths['audio_path'])
-                    download_progress.progress(1.0, "Download and conversion complete!")
-
-        # Only continue with transcription if we have an MP3 file
-        if not paths['audio_path'].endswith('.mp3'):
-            st.error("Please install ffmpeg and restart to continue processing")
-            return None
-
-        # Transcription progress
-        if not os.path.exists(paths['transcript_path']):
-            with _progress_container:
-                log_processing_step("Transcription", "started")
-                st.write("🎯 Transcribing audio...")
-                transcribe_progress = st.progress(0, "Starting transcription...")
-                transcript = transcribe_audio(paths['audio_path'])
-                if not transcript:
-                    log_processing_step("Transcription", "failed", "Failed to transcribe audio")
-                    raise Exception("Failed to transcribe audio")
-                with open(paths['transcript_path'], "w", encoding="utf-8") as f:
-                    f.write(transcript)
-                transcribe_progress.progress(1.0, "Transcription complete!")
-
-        # Quote generation progress
-        if not os.path.exists(paths['quotes_path']):
-            with _progress_container:
-                log_processing_step("Quote generation", "started")
-                st.write("✍️ Generating quotes...")
-                quote_progress = st.progress(0, "Processing transcript...")
-                with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
-                    transcript = f.read()
-                quotes = create_quote_thread(transcript, {"url": url})
-                with open(paths['quotes_path'], "w", encoding="utf-8") as f:
-                    f.write("\n\n".join(quotes) if isinstance(quotes, list) else quotes)
-                quote_progress.progress(1.0, "Quote generation complete!")
-
-        return paths
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
-        return None
-
-def regenerate_quotes(transcript_path: str, quotes_path: str, url: str) -> List[str]:
-    """Regenerate quotes from transcript."""
-    try:
-        with open(transcript_path, 'r', encoding='utf-8') as f:
-            transcript = f.read()
-        
-        # Add space info to match initial generation
-        space_info = {"url": url}
-        
-        # Call with error handling
-        try:
-            quotes = create_quote_thread(transcript, space_info)
-        except Exception as e:
-            st.error(f"Error calling quote generation API: {str(e)}")
-            return []
-        
-        if not quotes:
-            st.warning("No quotes were generated. Please try again.")
-            return []
-            
-        # Save new quotes
-        with open(quotes_path, 'w', encoding='utf-8') as f:
-            if isinstance(quotes, list):
-                f.write("\n\n".join(quotes))
-            else:
-                f.write(quotes)
-        
-        return quotes if isinstance(quotes, list) else quotes.split('\n\n')
-    except Exception as e:
-        st.error(f"Error regenerating quotes: {str(e)}")
-        return []
 
 def read_quotes(file_path: str) -> List[str]:
     """Read and parse quotes from a file.
@@ -558,56 +448,8 @@ def load_previous_media(space_id: str):
 
 def generate_summary(transcript: str, quotes: List[str]) -> Dict[str, str]:
     """Generate a comprehensive summary using both transcript and quotes."""
-    print("\n📝 Generating summary...")
-    
-    try:
-        # First, get a high-level summary from DeepSeek
-        response = call_deepseek_api([
-            {"role": "system", "content": """You are an expert at summarizing content. Create a clear, engaging summary that captures the main points and key insights. Focus on providing value to someone who hasn't heard the original content. Keep formatting minimal and clean."""},
-            {"role": "user", "content": f"""Please summarize this content with:
-1. A brief overview paragraph (2-3 sentences)
-2. 4-6 key points as simple bullet points
-
-Here's the transcript:
-{transcript}
-
-And here are some key quotes that were identified:
-{chr(10).join(quotes)}"""}
-        ])
-        
-        if not response:
-            return {
-                "overview": "Error generating summary",
-                "key_points": []
-            }
-
-        # Parse the response into overview and key points
-        content = response['content']
-        
-        # Split into sections and clean up
-        sections = content.split('\n\n')
-        overview = sections[0].strip()
-        
-        # Extract bullet points (looking for lines starting with • or -)
-        key_points = []
-        for line in content.split('\n'):
-            line = line.strip()
-            if line.startswith('•') or line.startswith('-'):
-                point = line.lstrip('•- ').strip()
-                if point:
-                    key_points.append(point)
-
-        return {
-            "overview": overview,
-            "key_points": key_points
-        }
-        
-    except Exception as e:
-        print(f"Error generating summary: {str(e)}")
-        return {
-            "overview": "Error generating summary",
-            "key_points": []
-        }
+    from core.summary import generate_summary as core_generate_summary
+    return core_generate_summary(transcript, quotes)
 
 def save_summary(summary: Dict[str, Any], path: str) -> None:
     """Save summary to a JSON file."""
@@ -643,6 +485,8 @@ with main_tab:
     with col1:
         # URL input
         space_url = st.text_input("Paste Media URL:", placeholder="https://x.com/i/status/1915404626754494957")
+        if space_url:  # If URL is pasted, automatically select "New URL"
+            st.session_state.selected_option = "New URL"
     
     with col2:
         if media_files:
@@ -654,12 +498,13 @@ with main_tab:
             selected_option = st.selectbox(
                 "Or select previous:",
                 options,
-                index=0,
+                index=0 if space_url else None,  # Default to "New URL" if URL is pasted
+                key="selected_option",  # Add key to track state
                 help="Select a previously processed media file",
                 format_func=lambda x: x if x == "New URL" else f"{x.split(' - ')[0]} - {x.split(' - ')[1][:8]}"  # Only clip hash for display
             )
             
-            if selected_option != "New URL":
+            if selected_option and selected_option != "New URL":  # Check for None and "New URL"
                 space_id = selected_option.split(" - ")[1]  # Get the full hash
                 space_url = url_history.get(space_id, "")
                 if st.button("📂 Load Selected"):
@@ -684,10 +529,31 @@ with main_tab:
             progress_container = st.container()
             with st.status("Processing media...", expanded=True) as status:
                 try:
-                    process_result = process_space(space_url, progress_container)
+                    process_result = process_space_with_ui(space_url, progress_container)
                     if process_result:
                         st.session_state.processing_complete = True
                         st.success("✅ Space processed successfully!")
+                        
+                        # Check if we need to generate summary
+                        paths = get_storage_paths(st.session_state.current_space_id)
+                        if not os.path.exists(paths['summary_path']):  # Only generate if doesn't exist
+                            if os.path.exists(paths['transcript_path']) and os.path.exists(paths['quotes_path']):
+                                with st.spinner("Generating summary..."):
+                                    # Read transcript and quotes
+                                    with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                                        transcript = f.read()
+                                    quotes = read_quotes(paths['quotes_path'])
+                                    
+                                    summary = generate_summary(transcript, quotes)
+                                    
+                                    if summary['overview'] != "Error generating summary":
+                                        # Save the summary
+                                        save_summary(summary, paths['summary_path'])
+                                        st.success("✨ Summary generated successfully!")
+                                    else:
+                                        st.error("Failed to generate summary. Please try manually.")
+                        else:
+                            logger.info("Summary already exists, skipping generation")
                 except Exception as e:
                     st.error(f"Error processing Space: {str(e)}")
                     status.update(label="Error!", state="error")
@@ -839,51 +705,85 @@ with summary_tab:
     if st.session_state.processing_complete and st.session_state.current_space_id:
         paths = get_storage_paths(st.session_state.current_space_id)
         
-        if os.path.exists(paths['transcript_path']) and os.path.exists(paths['quotes_path']):
-            # Check if we already have a summary
-            existing_summary = load_summary(paths['summary_path'])
+        # Check for required files first
+        files_status = {
+            'transcript': os.path.exists(paths['transcript_path']),
+            'quotes': os.path.exists(paths['quotes_path']),
+            'summary': os.path.exists(paths['summary_path'])
+        }
+        
+        if not files_status['transcript'] or not files_status['quotes']:
+            st.warning("⚠️ Missing required files. Please process content first to generate a summary.")
+            # Show which files are missing
+            if not files_status['transcript']:
+                st.error("Missing transcript file")
+            if not files_status['quotes']:
+                st.error("Missing quotes file")
+        else:
+            # Load existing summary if available
+            existing_summary = load_summary(paths['summary_path']) if files_status['summary'] else None
+            
+            # Show summary status
+            if existing_summary:
+                st.info("✅ Summary already exists")
+            else:
+                st.info("ℹ️ No summary generated yet")
             
             # Add generate/regenerate button
-            button_text = "🔄 Regenerate Summary" if existing_summary else "🔄 Generate Summary"
+            button_text = "🔄 Regenerate Summary" if existing_summary else "✨ Generate Summary"
             if st.button(button_text):
-                with st.spinner("Generating summary..."):
-                    # Read transcript and quotes
-                    with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
-                        transcript = f.read()
-                    quotes = read_quotes(paths['quotes_path'])
+                try:
+                    with st.spinner("Reading files..."):
+                        # Read transcript and quotes
+                        with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                            transcript = f.read()
+                        quotes = read_quotes(paths['quotes_path'])
+                        
+                        if not transcript.strip():
+                            st.error("❌ Transcript file is empty")
+                            st.stop()
+                        if not quotes:
+                            st.error("❌ No quotes found")
+                            st.stop()
                     
-                    summary = generate_summary(transcript, quotes)
-                    
-                    if summary['overview'] != "Error generating summary":
-                        # Save the summary
-                        save_summary(summary, paths['summary_path'])
-                        existing_summary = summary
-                    else:
-                        st.error("Failed to generate summary. Please try again.")
+                    with st.spinner("Generating summary..."):
+                        summary = generate_summary(transcript, quotes)
+                        
+                        if summary['overview'] != "Error generating summary":
+                            # Save the summary
+                            save_summary(summary, paths['summary_path'])
+                            st.success("✨ Summary generated successfully!")
+                            existing_summary = summary  # Update the displayed summary
+                            st.rerun()  # Refresh to show new summary
+                        else:
+                            st.error("Failed to generate summary. Please try again.")
+                            logger.error("Summary generation failed: Error response from API")
+                except Exception as e:
+                    st.error(f"❌ Error generating summary: {str(e)}")
+                    logger.exception("Error during summary generation")
             
             # Display existing summary if available
             if existing_summary:
-                # Display overview
-                st.markdown("### Overview")
-                st.write(existing_summary['overview'])
-                
-                # Display key points
-                st.markdown("### Key Points")
-                for point in existing_summary['key_points']:
-                    st.markdown(f"• {point}")
-                
-                # Add download button for summary
-                summary_text = f"Overview:\n{existing_summary['overview']}\n\nKey Points:\n"
-                summary_text += '\n'.join(f"• {point}" for point in existing_summary['key_points'])
-                
-                st.download_button(
-                    "⬇️ Download Summary",
-                    summary_text,
-                    file_name=f"summary_{st.session_state.current_space_id[:8]}.txt",
-                    mime="text/plain"
-                )
-        else:
-            st.warning("Please process content first to generate a summary.")
+                with st.container():
+                    # Display overview without redundant header
+                    st.markdown("### Content Overview")
+                    st.write(existing_summary['overview'])
+                    
+                    # Display key points
+                    st.markdown("### Key Points")
+                    for point in existing_summary['key_points']:
+                        st.markdown(f"• {point}")
+                    
+                    # Add download button for summary
+                    summary_text = f"Content Overview:\n{existing_summary['overview']}\n\nKey Points:\n"
+                    summary_text += '\n'.join(f"• {point}" for point in existing_summary['key_points'])
+                    
+                    st.download_button(
+                        "⬇️ Download Summary",
+                        summary_text,
+                        file_name=f"summary_{st.session_state.current_space_id[:8]}.txt",
+                        mime="text/plain"
+                    )
     else:
         st.info("Process content in the Main tab to generate a summary.")
 

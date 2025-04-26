@@ -5,7 +5,7 @@ from datetime import datetime
 import re
 from dotenv import load_dotenv
 import time
-from api_utils import call_deepseek_api
+from utils.api import call_deepseek_api
 
 # Load environment variables
 load_dotenv()
