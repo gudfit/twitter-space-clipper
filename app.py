@@ -648,18 +648,19 @@ with main_tab:
         if media_files:
             # Create dropdown for previous URLs
             options = ["New URL"]
-            options.extend([f"{Path(f).stem} - {url_history.get(Path(f).stem, 'Unknown URL')}" 
+            options.extend([f"{url_history.get(Path(f).stem, 'Unknown URL')} - {Path(f).stem}" 
                           for f in media_files])
             
             selected_option = st.selectbox(
                 "Or select previous:",
                 options,
                 index=0,
-                help="Select a previously processed media file"
+                help="Select a previously processed media file",
+                format_func=lambda x: x if x == "New URL" else f"{x.split(' - ')[0]} - {x.split(' - ')[1][:8]}"  # Only clip hash for display
             )
             
             if selected_option != "New URL":
-                space_id = selected_option.split(" - ")[0]
+                space_id = selected_option.split(" - ")[1]  # Get the full hash
                 space_url = url_history.get(space_id, "")
                 if st.button("📂 Load Selected"):
                     paths = load_previous_media(space_id)

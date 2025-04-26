@@ -1,0 +1,63 @@
+# Prefer Simple, Robust Solutions
+
+## Rule Description
+Always prefer simple, direct solutions over complex ones. Complex solutions often introduce more edge cases and potential points of failure.
+
+## Example: Display Formatting vs Data Storage
+### ❌ Complex Approach (Avoid)
+```python
+# Creating a separate mapping to handle display formatting
+options = ["New URL"]
+option_to_id = {}
+for f in media_files:
+    space_id = Path(f).stem
+    display_url = url_history.get(space_id, 'Unknown URL')
+    option_text = f"{display_url} - {space_id[:8]}"
+    options.append(option_text)
+    option_to_id[option_text] = space_id
+
+# Now we need to maintain and handle the mapping
+selected_option = st.selectbox("Select:", options)
+space_id = option_to_id[selected_option]  # Potential edge cases with mapping
+```
+
+### ✅ Simple Approach (Prefer)
+```python
+# Store complete data, handle display separately
+options = ["New URL"]
+options.extend([f"{url_history.get(Path(f).stem, 'Unknown URL')} - {Path(f).stem}" 
+               for f in media_files])
+
+# Use built-in formatting for display only
+selected_option = st.selectbox(
+    "Select:",
+    options,
+    format_func=lambda x: x if x == "New URL" else f"{x.split(' - ')[0]} - {x.split(' - ')[1][:8]}"
+)
+```
+
+## Key Principles
+1. **Separate Data from Display**: Keep the complete data in your data structures, handle formatting only at display time
+2. **Avoid State Management**: Minimize additional state (like mappings) that needs to be maintained
+3. **Use Built-in Features**: Leverage existing functionality (like `format_func`) instead of creating custom solutions
+4. **Consider Edge Cases**: Simple solutions often have fewer edge cases to handle
+5. **Maintainability**: Simpler code is easier to understand and maintain
+
+## When to Apply
+- When handling data display vs storage
+- When dealing with UI formatting
+- When managing state in applications
+- When creating data transformations
+
+## Questions to Ask
+1. Am I creating additional state that needs to be maintained?
+2. Can this be solved with existing functionality?
+3. How many edge cases will I need to handle?
+4. Will another developer easily understand this solution?
+
+## Impact of Choosing Complex Solutions
+1. More potential points of failure
+2. Harder to debug and maintain
+3. More edge cases to handle
+4. Increased cognitive load for other developers
+5. Technical debt accumulation 

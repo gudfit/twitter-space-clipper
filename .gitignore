@@ -57,3 +57,6 @@ Thumbs.db
 
 storage/
 *.log
+
+# Private individual user cursor rules
+.cursor/rules/_*.mdc
