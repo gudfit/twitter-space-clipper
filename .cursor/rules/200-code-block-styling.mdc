@@ -1,0 +1,34 @@
+---
+description: 
+globs: *.py
+alwaysApply: false
+---
+# Streamlit Code Block Styling
+
+## Context
+- When displaying code or text content in Streamlit that needs proper wrapping
+- When using st.code or displaying long text content that should be wrapped
+
+## Requirements
+- Use streamlit_extras.stylable_container for code block styling
+- Apply white-space: pre-wrap to ensure proper text wrapping
+- Maintain consistent styling across all code blocks
+
+## Examples
+<example>
+# Good: Proper code block styling with wrapping
+with stylable_container(
+    "codeblock",
+    """
+    code {
+        white-space: pre-wrap !important;
+    }
+    """,
+):
+    st.code(long_text)
+</example>
+
+<example type="invalid">
+# Bad: Direct code display without wrapping
+st.code(long_text)
+</example>

@@ -1,6 +1,7 @@
 ---
 description: Python style rules
-globs: **/*.{py,py}
+globs: *.py
+alwaysApply: false
 ---
 # Role Definition
 

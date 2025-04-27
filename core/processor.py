@@ -3,8 +3,11 @@ import os
 import shutil
 import logging
 import json
+import fcntl
+import time
 from typing import Dict, Optional, Protocol, Any, Callable, List
 from pathlib import Path
+from datetime import datetime, timedelta
 
 from core.download import download_twitter_space
 from core.transcribe import transcribe_audio
@@ -18,6 +21,91 @@ logger = logging.getLogger(__name__)
 class ProgressCallback(Protocol):
     """Protocol for progress tracking callbacks."""
     def __call__(self, stage: str, progress: float, status: str) -> None: ...
+
+class ProcessLock:
+    """Context manager for process locking using file locks."""
+    def __init__(self, lock_path: str, timeout: int = 3600, retry_delay: float = 1.0, max_retries: int = 3):
+        self.lock_path = lock_path
+        self.lock_file = None
+        self.timeout = timeout
+        self.retry_delay = retry_delay
+        self.max_retries = max_retries
+        
+    def __enter__(self):
+        try:
+            # Create lock file if it doesn't exist
+            self.lock_file = open(self.lock_path, 'w')
+            
+            # Try to acquire lock
+            start_time = time.time()
+            retries = 0
+            
+            while retries < self.max_retries:
+                try:
+                    fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # Write current timestamp
+                    self.lock_file.seek(0)
+                    self.lock_file.write(str(time.time()))
+                    self.lock_file.flush()
+                    return self
+                except IOError:
+                    # Check if we've exceeded timeout
+                    if time.time() - start_time > self.timeout:
+                        raise TimeoutError("Failed to acquire lock: timeout exceeded")
+                    
+                    # Check if the existing lock is stale
+                    if self._is_lock_stale():
+                        logger.warning("Found stale lock, attempting to break it")
+                        self._break_stale_lock()
+                        retries += 1
+                        if retries >= self.max_retries:
+                            raise TimeoutError("Failed to acquire lock after breaking stale lock")
+                    
+                    # Sleep before retry
+                    time.sleep(self.retry_delay)
+            
+            raise TimeoutError("Failed to acquire lock: max retries exceeded")
+            
+        except Exception as e:
+            if self.lock_file:
+                try:
+                    self.lock_file.close()
+                except Exception:
+                    pass
+            raise e
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.lock_file:
+            try:
+                fcntl.flock(self.lock_file, fcntl.LOCK_UN)
+                self.lock_file.close()
+                if os.path.exists(self.lock_path):
+                    os.remove(self.lock_path)
+            except Exception as e:
+                logger.error(f"Error cleaning up lock file: {e}")
+
+    def _is_lock_stale(self) -> bool:
+        """Check if the existing lock is stale (older than timeout)."""
+        try:
+            if not os.path.exists(self.lock_path):
+                return True
+            with open(self.lock_path, 'r') as f:
+                content = f.read().strip()
+                if not content:
+                    return True
+                timestamp = float(content)
+                return time.time() - timestamp > self.timeout
+        except (IOError, ValueError):
+            return True
+
+    def _break_stale_lock(self):
+        """Break a stale lock by removing the lock file."""
+        try:
+            if os.path.exists(self.lock_path):
+                os.remove(self.lock_path)
+        except OSError as e:
+            logger.error(f"Error breaking stale lock: {e}")
+            pass
 
 def get_space_id(url: str) -> str:
     """Extract space ID from URL and create a hash for storage.
@@ -59,6 +147,47 @@ def get_storage_paths(storage_root: str, space_id: str) -> Dict[str, str]:
         'summary_path': str(summaries_dir / f"{space_id}.json")
     }
 
+def get_process_state(storage_root: str, space_id: str) -> Dict[str, Any]:
+    """Get the current processing state for a space.
+    
+    Args:
+        storage_root: Root directory for storage
+        space_id: Unique identifier for the space
+        
+    Returns:
+        Dictionary containing process state information
+    """
+    state_path = Path(storage_root) / "state" / f"{space_id}.json"
+    if state_path.exists():
+        try:
+            with open(state_path, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            pass
+    return {
+        'status': 'not_started',
+        'stage': None,
+        'progress': 0.0,
+        'last_updated': None,
+        'error': None
+    }
+
+def save_process_state(storage_root: str, space_id: str, state: Dict[str, Any]):
+    """Save the current processing state.
+    
+    Args:
+        storage_root: Root directory for storage
+        space_id: Unique identifier for the space
+        state: State dictionary to save
+    """
+    state_dir = Path(storage_root) / "state"
+    state_dir.mkdir(exist_ok=True)
+    state_path = state_dir / f"{space_id}.json"
+    
+    state['last_updated'] = datetime.now().isoformat()
+    with open(state_path, 'w') as f:
+        json.dump(state, f)
+
 def process_space(
     url: str,
     storage_root: str,
@@ -86,110 +215,149 @@ def process_space(
         space_id = get_space_id(url)
         paths = get_storage_paths(storage_root, space_id)
         
-        # Check if all files already exist
-        if all(os.path.exists(p) for p in paths.values()):
-            logger.info("All files already exist, skipping processing")
-            if progress_callback:
-                progress_callback("complete", 1.0, "Files already exist")
-            return paths
-
-        # Download audio if needed
-        if not os.path.exists(paths['audio_path']):
-            logger.info("Starting audio download")
-            if progress_callback:
-                progress_callback("download", 0.0, "Starting download...")
-                
-            downloaded_file = download_twitter_space(url, os.path.dirname(paths['audio_path']))
-            
-            if not downloaded_file:
-                logger.error("Failed to download audio")
-                raise Exception("Failed to download audio")
-                
-            if not downloaded_file.endswith('.mp3'):
-                logger.warning("Downloaded file is not MP3")
-                paths['audio_path'] = downloaded_file
-            else:
-                shutil.move(downloaded_file, paths['audio_path'])
-                
-            if progress_callback:
-                progress_callback("download", 1.0, "Download complete")
-
-        # Only continue with transcription if we have an MP3 file
-        if not paths['audio_path'].endswith('.mp3'):
-            logger.error("Audio file is not in MP3 format")
-            raise Exception("Audio file must be in MP3 format")
-
-        # Transcribe audio if needed
-        if not os.path.exists(paths['transcript_path']):
-            logger.info("Starting transcription")
-            if progress_callback:
-                progress_callback("transcribe", 0.0, "Starting transcription...")
-                
-            transcript = transcribe_audio(paths['audio_path'])
-            if not transcript:
-                logger.error("Failed to transcribe audio")
-                raise Exception("Failed to transcribe audio")
-                
-            with open(paths['transcript_path'], "w", encoding="utf-8") as f:
-                f.write(transcript)
-                
-            if progress_callback:
-                progress_callback("transcribe", 1.0, "Transcription complete")
-
-        # Generate quotes if needed
-        if not os.path.exists(paths['quotes_path']):
-            logger.info("Starting quote generation")
-            if progress_callback:
-                progress_callback("quotes", 0.0, "Generating quotes...")
-                
-            with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
-                transcript = f.read()
-                
-            quotes = create_quote_thread(transcript, {"url": url})
-            if not quotes:
-                logger.error("Failed to generate quotes")
-                raise Exception("Failed to generate quotes")
-                
-            with open(paths['quotes_path'], "w", encoding="utf-8") as f:
-                f.write("\n\n".join(quotes) if isinstance(quotes, list) else quotes)
-                
-            if progress_callback:
-                progress_callback("quotes", 1.0, "Quote generation complete")
-
-        # Generate summary if needed
-        if not os.path.exists(paths['summary_path']):
-            logger.info("Starting summary generation")
-            if progress_callback:
-                progress_callback("summary", 0.0, "Generating summary...")
-                
-            with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
-                transcript = f.read()
-                
-            # Read quotes
-            with open(paths['quotes_path'], 'r', encoding='utf-8') as f:
-                quotes_text = f.read()
-                quotes = [q.strip() for q in quotes_text.split('\n\n') if q.strip()]
-                
-            summary = generate_summary(transcript, quotes)
-            if summary['overview'] != "Error generating summary":
-                with open(paths['summary_path'], 'w', encoding='utf-8') as f:
-                    json.dump(summary, f, indent=2)
-                    
-                if progress_callback:
-                    progress_callback("summary", 1.0, "Summary generation complete")
-            else:
-                logger.error("Failed to generate summary")
-                if progress_callback:
-                    progress_callback("summary", 1.0, "Summary generation failed")
-
-        logger.info("Space processing completed successfully")
-        if progress_callback:
-            progress_callback("complete", 1.0, "Processing complete")
-            
-        return paths
+        # Set up state tracking
+        state_dir = Path(storage_root) / "state"
+        state_dir.mkdir(exist_ok=True)
+        lock_path = state_dir / f"{space_id}.lock"
         
+        # Try to acquire process lock
+        with ProcessLock(str(lock_path)) as lock:
+            # Get current state
+            state = get_process_state(storage_root, space_id)
+            
+            # Check if all files already exist
+            if all(os.path.exists(p) for p in paths.values()):
+                logger.info("All files already exist, skipping processing")
+                if progress_callback:
+                    progress_callback("complete", 1.0, "Files already exist")
+                return paths
+
+            # Update state to processing
+            state.update({
+                'status': 'processing',
+                'stage': 'starting',
+                'progress': 0.0,
+                'error': None
+            })
+            save_process_state(storage_root, space_id, state)
+
+            def update_progress(stage: str, progress: float, status: str):
+                """Update both callback and state."""
+                if progress_callback:
+                    progress_callback(stage, progress, status)
+                state.update({
+                    'stage': stage,
+                    'progress': progress,
+                    'status': status
+                })
+                save_process_state(storage_root, space_id, state)
+
+            # Download audio if needed
+            if not os.path.exists(paths['audio_path']):
+                logger.info("Starting audio download")
+                update_progress("download", 0.0, "Starting download...")
+                
+                downloaded_file = download_twitter_space(url, os.path.dirname(paths['audio_path']))
+                
+                if not downloaded_file:
+                    error_msg = "Failed to download audio"
+                    state.update({
+                        'status': 'error',
+                        'error': error_msg
+                    })
+                    save_process_state(storage_root, space_id, state)
+                    raise Exception(error_msg)
+                    
+                if not downloaded_file.endswith('.mp3'):
+                    logger.warning("Downloaded file is not MP3")
+                    paths['audio_path'] = downloaded_file
+                else:
+                    shutil.move(downloaded_file, paths['audio_path'])
+                    
+                update_progress("download", 1.0, "Download complete")
+
+            # Only continue with transcription if we have an MP3 file
+            if not paths['audio_path'].endswith('.mp3'):
+                logger.error("Audio file is not in MP3 format")
+                raise Exception("Audio file must be in MP3 format")
+
+            # Transcribe audio if needed
+            if not os.path.exists(paths['transcript_path']):
+                logger.info("Starting transcription")
+                update_progress("transcribe", 0.0, "Starting transcription...")
+                
+                transcript = transcribe_audio(paths['audio_path'])
+                if not transcript:
+                    logger.error("Failed to transcribe audio")
+                    raise Exception("Failed to transcribe audio")
+                    
+                with open(paths['transcript_path'], "w", encoding="utf-8") as f:
+                    f.write(transcript)
+                    
+                update_progress("transcribe", 1.0, "Transcription complete")
+
+            # Generate quotes if needed
+            if not os.path.exists(paths['quotes_path']):
+                logger.info("Starting quote generation")
+                update_progress("quotes", 0.0, "Generating quotes...")
+                
+                with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                    transcript = f.read()
+                    
+                quotes = create_quote_thread(transcript, {"url": url})
+                if not quotes:
+                    logger.error("Failed to generate quotes")
+                    raise Exception("Failed to generate quotes")
+                    
+                with open(paths['quotes_path'], "w", encoding="utf-8") as f:
+                    f.write("\n\n".join(quotes) if isinstance(quotes, list) else quotes)
+                    
+                update_progress("quotes", 1.0, "Quote generation complete")
+
+            # Generate summary if needed
+            if not os.path.exists(paths['summary_path']):
+                logger.info("Starting summary generation")
+                update_progress("summary", 0.0, "Generating summary...")
+                
+                with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                    transcript = f.read()
+                    
+                # Read quotes
+                with open(paths['quotes_path'], 'r', encoding='utf-8') as f:
+                    quotes_text = f.read()
+                    quotes = [q.strip() for q in quotes_text.split('\n\n') if q.strip()]
+                    
+                summary = generate_summary(transcript, quotes)
+                if summary['overview'] != "Error generating summary":
+                    with open(paths['summary_path'], 'w', encoding='utf-8') as f:
+                        json.dump(summary, f, indent=2)
+                        
+                    update_progress("summary", 1.0, "Summary generation complete")
+                else:
+                    logger.error("Failed to generate summary")
+                    update_progress("summary", 1.0, "Summary generation failed")
+
+            # Update final state
+            state.update({
+                'status': 'complete',
+                'stage': 'complete',
+                'progress': 1.0,
+                'error': None
+            })
+            save_process_state(storage_root, space_id, state)
+            
+            return paths
+            
     except Exception as e:
         logger.exception("Error processing space")
+        # Update error state
+        state = get_process_state(storage_root, space_id)
+        state.update({
+            'status': 'error',
+            'error': str(e)
+        })
+        save_process_state(storage_root, space_id, state)
+        
         if progress_callback:
             progress_callback("error", 0.0, str(e))
         return None

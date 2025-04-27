@@ -1,6 +1,7 @@
 ---
 description: Prefer Simple, Robust Solutions
-globs: **/*.{py,py}
+globs: *.py
+alwaysApply: false
 ---
 # Prefer Simple, Robust Solutions
 
