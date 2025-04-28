@@ -163,13 +163,13 @@ def extract_speaker_quotes(transcript: str, speaker_info: Dict) -> List[str]:
             response = call_deepseek_api([
                 {"role": "system", "content": """You are an expert at identifying impactful and quotable moments from conversations. Your task is to extract the most interesting, insightful, or memorable quotes that would work well on Twitter. Each quote should:
 1. Be self-contained and meaningful on its own
-2. Be under 240 characters
+2. Be around 240 characters
 3. Capture a key insight, opinion, or memorable statement
 4. Be something the speaker would be proud to have quoted
 
-Format each quote on a new line, starting with the speaker's handle."""},
-                {"role": "user", "content": f"""Extract the best quotes from this segment by {speaker}. Format each quote on a new line starting with their handle.
-
+Format each quote on a new line, starting with the speaker's handle.
+Do not include any summary, heading, or commentary—just the quotes themselves, each on a new line. Each quote must be self-contained, under 240 characters, and require no additional explanation."""},
+                {"role": "user", "content": f"""Extract only the notable quotes from this segment by {speaker}. Return only the quotes, each on a new line. No summary, heading, or commentary.
 {chunk}"""}
             ])
             
