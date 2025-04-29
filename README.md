@@ -132,6 +132,68 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/"
 - `core/transcribe.py` - Audio transcription
 - `core/quotes.py` - Quote generation
 - `core/summary.py` - Summary generation
+- `celery_worker/` - Background job processing with Celery
+
+## Celery Integration
+
+The application uses Celery for handling long-running tasks like transcription, quote generation, and summary generation. This allows for better scalability and responsiveness of the web interface.
+
+### Setup Redis (Broker/Backend)
+
+1. Install Redis:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install redis-server
+   
+   # macOS
+   brew install redis
+   
+   # Windows
+   # Download from https://github.com/microsoftarchive/redis/releases
+   ```
+
+2. Start Redis server:
+   ```bash
+   # Ubuntu/Debian
+   sudo service redis-server start
+   
+   # macOS
+   brew services start redis
+   
+   # Windows
+   redis-server
+   ```
+
+3. Configure Redis connection in `.env`:
+   ```
+   CELERY_BROKER_URL=redis://localhost:6379/0
+   CELERY_RESULT_BACKEND=redis://localhost:6379/0
+   ```
+
+### Running Celery Worker
+
+1. Start the Celery worker:
+   ```bash
+   # From project root
+   celery -A celery_worker.celery_app worker --loglevel=info
+   ```
+
+2. For development with auto-reload:
+   ```bash
+   # Install watchdog for auto-reload
+   pip install watchdog
+   
+   # Start worker with auto-reload
+   celery -A celery_worker.celery_app worker --loglevel=info --pool=solo --autoreload
+   ```
+
+### Task Status Monitoring
+
+The application tracks task progress and status in the `storage/state/` directory. Each processing job has its own state file that includes:
+- Current processing stage
+- Progress percentage
+- Status messages
+- Error information (if any)
 
 ## Security Note
 - The app is password protected via Streamlit secrets

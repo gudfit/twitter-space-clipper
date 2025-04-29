@@ -33,7 +33,14 @@ When adding or modifying Celery tasks in this codebase, follow these best practi
     ```
 - **Testing Tasks:**
   - When testing, import tasks from the main tasks module, not from test scripts.
-  - Run test scripts from the project root, or set `PYTHONPATH=.` if needed.
+  - **IMPORTANT:** Always run test scripts with `PYTHONPATH=.` to ensure proper module resolution:
+    ```bash
+    # This will fail
+    python tests/test_celery_worker.py
+    
+    # This will work - ALWAYS use this approach
+    PYTHONPATH=. python tests/test_celery_worker.py
+    ```
 - **Project Structure:**
   - Ensure all relevant directories (`celery_worker/`, `tests/`) contain an `__init__.py` file to make them Python packages.
 
@@ -45,8 +52,12 @@ When adding or modifying Celery tasks in this codebase, follow these best practi
   - Solution: Use `include` in the Celery app, do not import tasks at the top level of the app file.
 - **Unregistered Task Error:**
   - Solution: Ensure the worker is started with the correct app and that tasks are included via the `include` argument.
-- **ModuleNotFoundError:**
-  - Solution: Run scripts from the project root and ensure all packages have `__init__.py` files.
+- **ModuleNotFoundError: No module named 'celery_worker':**
+  - Solution: Always run scripts with `PYTHONPATH=.` to ensure Python can find your project modules:
+    ```bash
+    PYTHONPATH=. python tests/test_celery_worker.py
+    ```
+  - This is especially important when running tests or scripts from subdirectories.
 
 ---
 
@@ -65,8 +76,11 @@ from celery_worker.celery_app import celery_app
 @celery_app.task
 def add(x, y):
     return x + y
+
+# tests/test_celery_worker.py
+from celery_worker.tasks import add  # Requires PYTHONPATH=. to work
 ```
 
 ---
 
-> 💡 **Tip:** If you see errors about unregistered tasks or circular imports, check your app's `include` argument and your import paths first. 
+> 💡 **Tip:** If you see `ModuleNotFoundError`, always try running your script with `PYTHONPATH=.` first. This is a common issue when running tests or scripts that need to import from your project's root package. 

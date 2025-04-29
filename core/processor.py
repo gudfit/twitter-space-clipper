@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 from core.download import download_twitter_space
-from core.transcribe import transcribe_audio
+from celery_worker.tasks import transcribe_task, generate_quotes_task, generate_summary_task
 from core.quotes import create_quote_thread
 from core.summary import generate_summary
 from utils.file_utils import clean_filename
@@ -198,101 +198,69 @@ def process_space(
     
     Args:
         url: URL of the media to process
-        storage_root: Root directory for storing files
+        storage_root: Root directory for storage
         progress_callback: Optional callback for progress updates
         download_callback: Optional callback for download progress
         
     Returns:
-        Dictionary of paths to generated files or None on error
-        
-    Example:
-        >>> def progress(stage, progress, status):
-        ...     print(f"{stage}: {progress*100:.0f}% - {status}")
-        >>> paths = process_space("https://example.com/media", "storage", progress)
+        Dictionary of paths to generated files if successful, None otherwise
     """
     try:
-        logger.info(f"Starting space processing for URL: {url}")
+        # Extract space ID from URL
         space_id = get_space_id(url)
+        if not space_id:
+            logger.error(f"Could not extract space ID from URL: {url}")
+            return None
+            
+        # Get storage paths
         paths = get_storage_paths(storage_root, space_id)
         
-        # Set up state tracking
-        state_dir = Path(storage_root) / "state"
-        state_dir.mkdir(exist_ok=True)
-        lock_path = state_dir / f"{space_id}.lock"
+        # Initialize or get process state
+        state = get_process_state(storage_root, space_id)
         
-        # Try to acquire process lock
-        with ProcessLock(str(lock_path)) as lock:
-            # Get current state
-            state = get_process_state(storage_root, space_id)
-            
-            # Check if all files already exist
-            if all(os.path.exists(p) for p in paths.values()):
-                logger.info("All files already exist, skipping processing")
-                if progress_callback:
-                    progress_callback("complete", 1.0, "Files already exist")
-                return paths
-
-            # Update state to processing
+        def update_progress(stage: str, progress: float, status: str):
+            """Update progress state and call progress callback if provided."""
+            if progress_callback:
+                progress_callback(stage, progress, status)
             state.update({
-                'status': 'processing',
-                'stage': 'starting',
-                'progress': 0.0,
-                'error': None
+                'stage': stage,
+                'progress': progress,
+                'status': status,
+                'last_update': datetime.now().isoformat()
             })
             save_process_state(storage_root, space_id, state)
-
-            def update_progress(stage: str, progress: float, status: str):
-                """Update both callback and state."""
-                if progress_callback:
-                    progress_callback(stage, progress, status)
-                state.update({
-                    'stage': stage,
-                    'progress': progress,
-                    'status': status
-                })
-                save_process_state(storage_root, space_id, state)
-
+        
+        # Acquire process lock
+        with ProcessLock(storage_root, space_id):
             # Download audio if needed
             if not os.path.exists(paths['audio_path']):
-                logger.info("Starting audio download")
+                logger.info("Starting download")
                 update_progress("download", 0.0, "Starting download...")
                 
-                downloaded_file = download_twitter_space(url, os.path.dirname(paths['audio_path']))
-                
-                if not downloaded_file:
-                    error_msg = "Failed to download audio"
-                    state.update({
-                        'status': 'error',
-                        'error': error_msg
-                    })
-                    save_process_state(storage_root, space_id, state)
-                    raise Exception(error_msg)
-                    
-                if not downloaded_file.endswith('.mp3'):
-                    logger.warning("Downloaded file is not MP3")
-                    paths['audio_path'] = downloaded_file
-                else:
-                    shutil.move(downloaded_file, paths['audio_path'])
+                success = download_twitter_space(url, paths['audio_path'], download_callback)
+                if not success:
+                    logger.error("Failed to download audio")
+                    raise Exception("Failed to download audio")
                     
                 update_progress("download", 1.0, "Download complete")
-
-            # Only continue with transcription if we have an MP3 file
-            if not paths['audio_path'].endswith('.mp3'):
-                logger.error("Audio file is not in MP3 format")
-                raise Exception("Audio file must be in MP3 format")
 
             # Transcribe audio if needed
             if not os.path.exists(paths['transcript_path']):
                 logger.info("Starting transcription")
                 update_progress("transcribe", 0.0, "Starting transcription...")
                 
-                transcript = transcribe_audio(paths['audio_path'])
+                # Submit transcription task
+                task_result = transcribe_task.delay(paths['audio_path'], paths['transcript_path'])
+                
+                # Wait for task completion
+                while not task_result.ready():
+                    time.sleep(5)  # Poll every 5 seconds
+                    update_progress("transcribe", 0.5, "Transcription in progress...")
+                
+                transcript = task_result.get()  # This will raise an exception if the task failed
                 if not transcript:
                     logger.error("Failed to transcribe audio")
                     raise Exception("Failed to transcribe audio")
-                    
-                with open(paths['transcript_path'], "w", encoding="utf-8") as f:
-                    f.write(transcript)
                     
                 update_progress("transcribe", 1.0, "Transcription complete")
 
@@ -301,16 +269,22 @@ def process_space(
                 logger.info("Starting quote generation")
                 update_progress("quotes", 0.0, "Generating quotes...")
                 
+                # Read transcript
                 with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
                     transcript = f.read()
-                    
-                quotes = create_quote_thread(transcript, {"url": url})
+                
+                # Submit quote generation task
+                task_result = generate_quotes_task.delay(transcript, {"url": url}, paths['quotes_path'])
+                
+                # Wait for task completion
+                while not task_result.ready():
+                    time.sleep(5)  # Poll every 5 seconds
+                    update_progress("quotes", 0.5, "Quote generation in progress...")
+                
+                quotes = task_result.get()  # This will raise an exception if the task failed
                 if not quotes:
                     logger.error("Failed to generate quotes")
                     raise Exception("Failed to generate quotes")
-                    
-                with open(paths['quotes_path'], "w", encoding="utf-8") as f:
-                    f.write("\n\n".join(quotes) if isinstance(quotes, list) else quotes)
                     
                 update_progress("quotes", 1.0, "Quote generation complete")
 
@@ -319,19 +293,23 @@ def process_space(
                 logger.info("Starting summary generation")
                 update_progress("summary", 0.0, "Generating summary...")
                 
+                # Read transcript and quotes
                 with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
                     transcript = f.read()
-                    
-                # Read quotes
                 with open(paths['quotes_path'], 'r', encoding='utf-8') as f:
                     quotes_text = f.read()
                     quotes = [q.strip() for q in quotes_text.split('\n\n') if q.strip()]
-                    
-                summary = generate_summary(transcript, quotes)
-                if summary['overview'] != "Error generating summary":
-                    with open(paths['summary_path'], 'w', encoding='utf-8') as f:
-                        json.dump(summary, f, indent=2)
-                        
+                
+                # Submit summary generation task
+                task_result = generate_summary_task.delay(transcript, quotes, paths['summary_path'])
+                
+                # Wait for task completion
+                while not task_result.ready():
+                    time.sleep(5)  # Poll every 5 seconds
+                    update_progress("summary", 0.5, "Summary generation in progress...")
+                
+                summary = task_result.get()  # This will raise an exception if the task failed
+                if summary:
                     update_progress("summary", 1.0, "Summary generation complete")
                 else:
                     logger.error("Failed to generate summary")

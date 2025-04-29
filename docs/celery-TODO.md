@@ -5,12 +5,12 @@
 - [x] Create `celery_worker/` directory at the project root
   - [x] Add `celery_app.py` (Celery app factory/config)
   - [x] Add `tasks.py` (Celery tasks stubs for transcription, quote generation, summarization)
-  - [ ] Add `__init__.py` (optional, for package completeness)
+  - [x] Add `__init__.py` (optional, for package completeness)
 
 ## Celery Setup
 - [x] Add Celery app config in `celery_worker/celery_app.py`
 - [x] Add task stubs in `celery_worker/tasks.py`
-- [ ] Add Celery to `requirements.txt` (pending)
+- [x] Add Celery to `requirements.txt` (pending)
 
 ## Broker & Backend
 - [x] Default to Redis for broker and backend (configurable via env)
