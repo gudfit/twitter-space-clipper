@@ -25,16 +25,33 @@
 - [ ] Poll for job status and display progress/results (pending)
 - [ ] Add error handling and user feedback for job failures (pending)
 
+## UI Improvements
+- [x] Fix URL display and selection
+  - [x] Show truncated URLs in media selector dropdown
+  - [x] Place selected URL in editable input field
+  - [x] Remove redundant URL displays
+  - [x] Improve URL history loading and display
+- [x] Improve media selection interface
+  - [x] Add file size information
+  - [x] Simplify media loading workflow
+  - [x] Better organization of media selector and input fields
+- [x] Fix content display after loading
+  - [x] Show quotes, audio, and transcript tabs properly
+  - [x] Maintain proper state across UI updates
+  - [x] Fix regeneration of quotes for loaded media
+
 ## Monitoring & Admin
 - [ ] Add Flower or similar Celery monitoring tool (optional, pending)
 
 ## Testing & Documentation
 - [ ] Test end-to-end: job submission, processing, result retrieval, error handling (pending)
 - [ ] Update documentation (README, PRD) with new architecture and usage instructions (pending)
+- [ ] Document recent UI improvements and features
 
 ---
 
 **Comments:**
-- Project structure and Celery scaffolding are in place.
-- Next steps: implement real business logic in tasks, update requirements, and integrate with Streamlit UI.
-- See `TODO.md` for a parallel checklist.
+- Project structure and Celery scaffolding are in place
+- UI improvements have been completed, focusing on better URL handling and media selection
+- Next steps: implement Celery tasks integration and update documentation
+- Consider adding more UI improvements based on user feedback
