@@ -2,6 +2,18 @@
 import os
 import sys
 from streamlit.web.cli import main
+import streamlit.watcher.path_watcher
+
+# Patch the file watcher to ignore PyTorch files
+original_watch_file = streamlit.watcher.path_watcher.watch_file
+
+def patched_watch_file(filepath: str, *args, **kwargs):
+    """Patched watch_file function that ignores PyTorch files."""
+    if 'torch' in filepath or '_C' in filepath:
+        return None
+    return original_watch_file(filepath, *args, **kwargs)
+
+streamlit.watcher.path_watcher.watch_file = patched_watch_file
 
 if __name__ == "__main__":
     # Get the directory of this script

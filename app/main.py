@@ -934,15 +934,31 @@ if check_password():
     main_tab, summary_tab, logs_tab, history_tab, help_tab = st.tabs(["🎯 Main", "📝 Summary", "🔍 Logs", "📚 History", "❓ Help"])
 
     with main_tab:
+        # Add URL input field at the top
+        url = st.text_input("Paste Media URL:", key="url_input")
+        
+        # Process button
+        if url and st.button("🚀 Process", key="process_button"):
+            # Create progress container
+            progress_container = st.container()
+            
+            # Process the URL
+            try:
+                result_paths = process_space_with_ui(url, progress_container)
+                if result_paths:
+                    # Save URL to history
+                    space_id = get_space_id(url)
+                    save_url_history(space_id, url)
+                    st.session_state.current_space_id = space_id
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error processing URL: {str(e)}")
+        
         # If we have a current_space_id from sidebar, load its details
         if st.session_state.current_space_id:
             space_id = st.session_state.current_space_id
             state = get_process_state(str(STORAGE_DIR), space_id)
             space_url = st.session_state.url_history.get(space_id, '')
-            
-            # Show the URL in the input field
-            if space_url:
-                st.text_input("Paste Media URL:", value=space_url, key="url_input")
             
             # Show process status
             progress_container = st.container()
