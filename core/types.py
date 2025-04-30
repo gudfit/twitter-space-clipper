@@ -12,6 +12,8 @@ class ProcessState(TypedDict):
     current_chunk: Optional[int]  # Current chunk being processed
     total_chunks: Optional[int]  # Total number of chunks
     completed_chunks: List[int]  # List of completed chunk indices
+    # Console output capture
+    console_output: Optional[str]  # Captured console output for current stage
 
 class StoragePaths(TypedDict):
     """Type definition for storage paths."""

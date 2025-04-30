@@ -6,6 +6,9 @@ import json
 import fcntl
 import time
 import subprocess
+import sys
+import io
+from contextlib import redirect_stdout, redirect_stderr
 from typing import Dict, Optional, Protocol, Any, Callable, List, TypedDict, Union
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -244,7 +247,8 @@ def get_process_state(storage_root: str, space_id: str) -> ProcessState:
         'files': {},
         'current_chunk': None,
         'total_chunks': None,
-        'completed_chunks': []
+        'completed_chunks': [],
+        'console_output': None
     }
     
     if state_path.exists():
@@ -316,6 +320,22 @@ def save_process_state(storage_root: str, space_id: str, state: ProcessState) ->
     with open(state_path, 'w') as f:
         json.dump(state, f)
 
+def update_state_with_output(state: ProcessState, stage: str, progress: float, status: str, output: str):
+    """Update state with new console output, preserving stage-specific output."""
+    if state.get('stage') != stage:
+        # Clear output when switching stages
+        state['console_output'] = ''
+    
+    # Append new output
+    current_output = state.get('console_output', '')
+    state.update({
+        'stage': stage,
+        'progress': progress,
+        'status': 'processing' if progress < 1.0 else 'complete',
+        'last_updated': datetime.now().isoformat(),
+        'console_output': current_output + output if current_output else output
+    })
+
 def process_space(
     url: str,
     storage_root: str,
@@ -346,16 +366,11 @@ def process_space(
         # Initialize or get process state
         state = get_process_state(storage_root, space_id)
         
-        def update_progress(stage: str, progress: float, status: str = ""):
+        def update_progress(stage: str, progress: float, status: str = "", output: str = ""):
             """Update progress state and call progress callback if provided."""
             if progress_callback:
                 progress_callback(stage, progress, status)
-            state.update({
-                'stage': stage,
-                'progress': progress,
-                'status': 'processing' if progress < 1.0 else 'complete',
-                'last_updated': datetime.now().isoformat()
-            })
+            update_state_with_output(state, stage, progress, status, output)
             save_process_state(storage_root, space_id, state)
         
         # Acquire process lock
@@ -372,249 +387,293 @@ def process_space(
                 save_process_state(storage_root, space_id, state)
                 return paths
 
+            # Determine which stage to resume from based on existing files
+            files_exist = {
+                'audio': os.path.exists(paths['audio_path']),
+                'transcript': os.path.exists(paths['transcript_path']),
+                'quotes': os.path.exists(paths['quotes_path']),
+                'summary': os.path.exists(paths['summary_path'])
+            }
+            
+            # Update state with current files
+            state['files'] = files_exist
+            
+            # Determine next stage based on existing files
+            if state['status'] == 'processing':
+                if not files_exist['audio']:
+                    state['stage'] = 'download'
+                elif not files_exist['transcript']:
+                    state['stage'] = 'transcribe'
+                elif not files_exist['quotes']:
+                    state['stage'] = 'quotes'
+                elif not files_exist['summary']:
+                    state['stage'] = 'summary'
+                state['progress'] = 0.0
+                save_process_state(storage_root, space_id, state)
+
             try:
                 # Download audio if needed
                 if not os.path.exists(paths['audio_path']):
                     logger.info("Starting audio download")
                     update_progress("download", 0.0, "Starting download...")
                     
-                    def download_progress_hook(d: Dict[str, Any]):
-                        """Progress hook for yt-dlp."""
-                        if d['status'] == 'downloading':
-                            total_bytes = d.get('total_bytes')
-                            downloaded_bytes = d.get('downloaded_bytes', 0)
-                            if total_bytes:
-                                progress = downloaded_bytes / total_bytes
+                    # Capture download output
+                    output_buffer = io.StringIO()
+                    with redirect_stdout(output_buffer), redirect_stderr(output_buffer):
+                        def download_progress_hook(d: Dict[str, Any]):
+                            if d['status'] == 'downloading':
+                                total_bytes = d.get('total_bytes')
+                                downloaded_bytes = d.get('downloaded_bytes', 0)
+                                if total_bytes:
+                                    progress = downloaded_bytes / total_bytes
                                 speed = d.get('speed', 0)
                                 if speed:
                                     speed_mb = speed / (1024 * 1024)
                                     status = f"Downloading media: {progress*100:.1f}% ({speed_mb:.1f} MB/s)"
                                 else:
                                     status = f"Downloading media: {progress*100:.1f}%"
-                            else:
-                                progress = 0
-                                status = "Downloading media..."
-                            update_progress("download", progress * 0.8, status)
-                        elif d['status'] == 'finished':
-                            update_progress("download", 0.8, "Download complete, extracting audio...")
-                    
-                    # Configure download options with progress tracking
-                    download_opts = {
-                        'format': 'bestaudio/best',
-                        'outtmpl': os.path.join(os.path.dirname(paths['audio_path']), '%(id)s.%(ext)s'),
-                        'progress_hooks': [download_progress_hook],
-                        'keepvideo': True,
-                        'postprocessors': []
-                    }
-                    
-                    try:
-                        with yt_dlp.YoutubeDL(download_opts) as ydl:
-                            update_progress("download", 0.1, "Fetching media information...")
-                            info = ydl.extract_info(url, download=True)
-                            original_file = os.path.join(os.path.dirname(paths['audio_path']), f"{info['id']}.{info['ext']}")
-                            
-                            # Convert to MP3 if needed
-                            if info['ext'] != 'mp3':
-                                if check_ffmpeg():
-                                    logger.info("Converting to MP3...")
-                                    update_progress("download", 0.9, "Converting to MP3 format...")
-                                    
-                                    # Run ffmpeg conversion
-                                    subprocess.run([
-                                        'ffmpeg', '-i', original_file,
-                                        '-vn', '-ar', '44100', '-ac', '2',
-                                        '-b:a', '192k', paths['audio_path']
-                                    ], check=True)
-                                    
-                                    # Clean up original file
-                                    os.remove(original_file)
-                                    
-                                    update_progress("download", 1.0, "Audio extraction complete")
+                                # Update with captured output
+                                update_progress("download", progress * 0.8, status, output_buffer.getvalue())
+                            elif d['status'] == 'finished':
+                                update_progress("download", 0.8, "Download complete, extracting audio...", output_buffer.getvalue())
+                        
+                        # Configure download options with progress tracking
+                        download_opts = {
+                            'format': 'bestaudio/best',
+                            'outtmpl': os.path.join(os.path.dirname(paths['audio_path']), '%(id)s.%(ext)s'),
+                            'progress_hooks': [download_progress_hook],
+                            'keepvideo': True,
+                            'postprocessors': []
+                        }
+                        
+                        try:
+                            with yt_dlp.YoutubeDL(download_opts) as ydl:
+                                info = ydl.extract_info(url, download=True)
+                                original_file = os.path.join(os.path.dirname(paths['audio_path']), f"{info['id']}.{info['ext']}")
+                                
+                                # Convert to MP3 if needed
+                                if info['ext'] != 'mp3':
+                                    if check_ffmpeg():
+                                        logger.info("Converting to MP3...")
+                                        update_progress("download", 0.9, "Converting to MP3 format...", output_buffer.getvalue())
+                                        
+                                        # Run ffmpeg conversion and capture output
+                                        ffmpeg_process = subprocess.Popen(
+                                            ['ffmpeg', '-i', original_file, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', paths['audio_path']],
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                            universal_newlines=True
+                                        )
+                                        stdout, stderr = ffmpeg_process.communicate()
+                                        output_buffer.write(stdout)
+                                        output_buffer.write(stderr)
+                                        
+                                        # Clean up original file
+                                        os.remove(original_file)
+                                        update_progress("download", 1.0, "Audio extraction complete", output_buffer.getvalue())
+                                    else:
+                                        logger.warning("ffmpeg not found - keeping original format")
+                                        update_progress("download", 1.0, "Download complete (original format)", output_buffer.getvalue())
+                                        shutil.move(original_file, paths['audio_path'])
                                 else:
-                                    logger.warning("ffmpeg not found - keeping original format")
-                                    update_progress("download", 1.0, "Download complete (original format)")
+                                    # If already MP3, just move to final location
                                     shutil.move(original_file, paths['audio_path'])
-                            else:
-                                # If already MP3, just move to final location
-                                shutil.move(original_file, paths['audio_path'])
-                                update_progress("download", 1.0, "Download complete")
-                            
-                            # Ensure file exists and is readable
-                            if not os.path.exists(paths['audio_path']):
-                                raise Exception("Audio file not found after download")
-                            
-                    except Exception as e:
-                        logger.error(f"Download failed: {str(e)}")
-                        state.update({
-                            'status': 'error',
-                            'error': f'Download failed: {str(e)}',
-                            'progress': 0.0
-                        })
-                        save_process_state(storage_root, space_id, state)
-                        raise
+                                    update_progress("download", 1.0, "Download complete", output_buffer.getvalue())
+                                
+                                # Ensure file exists and is readable
+                                if not os.path.exists(paths['audio_path']):
+                                    raise Exception("Audio file not found after download")
+                                
+                                # Update files status after successful download
+                                state['files']['audio'] = True
+                                save_process_state(storage_root, space_id, state)
+                                
+                                # Start transcription immediately
+                                update_progress("transcribe", 0.0, "Starting transcription...", "")
+                                
+                        except Exception as e:
+                            error_msg = f"Download failed: {str(e)}\n{output_buffer.getvalue()}"
+                            logger.error(error_msg)
+                            state.update({
+                                'status': 'error',
+                                'error': error_msg,
+                                'progress': 0.0
+                            })
+                            save_process_state(storage_root, space_id, state)
+                            raise
 
                 # Transcribe audio if needed
                 if not os.path.exists(paths['transcript_path']):
                     logger.info("Starting transcription")
                     update_progress("transcribe", 0.0, "Starting transcription...")
                     
-                    from .transcribe import transcribe_audio
-                    
-                    # Retry transcription a few times if it fails
-                    max_retries = 3
-                    retry_delay = 5  # seconds
-                    
-                    for attempt in range(max_retries):
-                        try:
-                            update_progress("transcribe", 0.2, f"Transcription attempt {attempt + 1}...")
-                            
-                            transcript = transcribe_audio(paths['audio_path'])
-                            
-                            if transcript:
-                                # Save transcript
-                                with open(paths['transcript_path'], 'w', encoding='utf-8') as f:
-                                    f.write(transcript)
+                    output_buffer = io.StringIO()
+                    with redirect_stdout(output_buffer), redirect_stderr(output_buffer):
+                        from .transcribe import transcribe_audio
+                        
+                        max_retries = 3
+                        retry_delay = 5
+                        
+                        for attempt in range(max_retries):
+                            try:
+                                update_progress("transcribe", 0.2, f"Transcription attempt {attempt + 1}...", output_buffer.getvalue())
+                                transcript = transcribe_audio(paths['audio_path'])
                                 
-                                update_progress("transcribe", 1.0, "Transcription complete")
-                                break
-                            else:
-                                logger.warning(f"Transcription attempt {attempt + 1} failed to produce output")
+                                if transcript:
+                                    with open(paths['transcript_path'], 'w', encoding='utf-8') as f:
+                                        f.write(transcript)
+                                    update_progress("transcribe", 1.0, "Transcription complete", output_buffer.getvalue())
+                                    break
+                                else:
+                                    error_msg = f"Transcription attempt {attempt + 1} failed to produce output"
+                                    logger.warning(error_msg)
+                                    output_buffer.write(f"\n{error_msg}")
+                                    if attempt < max_retries - 1:
+                                        time.sleep(retry_delay)
+                                        continue
+                                    else:
+                                        raise Exception("Failed to transcribe audio after all retries")
+                                    
+                            except Exception as e:
+                                error_msg = f"Transcription attempt {attempt + 1} failed: {str(e)}"
+                                logger.error(error_msg)
+                                output_buffer.write(f"\n{error_msg}")
                                 if attempt < max_retries - 1:
                                     time.sleep(retry_delay)
                                     continue
                                 else:
-                                    raise Exception("Failed to transcribe audio after all retries")
-                                
-                        except Exception as e:
-                            logger.error(f"Transcription attempt {attempt + 1} failed: {str(e)}")
-                            if attempt < max_retries - 1:
-                                time.sleep(retry_delay)
-                                continue
-                            else:
-                                state.update({
-                                    'status': 'error',
-                                    'error': f'Transcription failed: {str(e)}',
-                                    'progress': 0.0
-                                })
-                                save_process_state(storage_root, space_id, state)
-                                raise Exception(f"Failed to transcribe audio after {max_retries} attempts: {str(e)}")
+                                    state.update({
+                                        'status': 'error',
+                                        'error': f'Transcription failed: {str(e)}',
+                                        'progress': 0.0,
+                                        'console_output': output_buffer.getvalue()
+                                    })
+                                    save_process_state(storage_root, space_id, state)
+                                    raise
 
                 # Generate quotes if needed
                 if not os.path.exists(paths['quotes_path']):
                     logger.info("Starting quote generation")
                     update_progress("quotes", 0.0, "Generating quotes...")
                     
-                    try:
-                        # Read transcript
-                        with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
-                            transcript = f.read()
-                        
-                        # Split transcript into chunks
-                        chunks = chunk_transcript(transcript)
-                        total_chunks = len(chunks)
-                        
-                        # Update state with chunk information
-                        state.update({
-                            'total_chunks': total_chunks,
-                            'current_chunk': 0,
-                            'completed_chunks': []
-                        })
-                        save_process_state(storage_root, space_id, state)
-                        
-                        # Create temporary directory for chunk quotes
-                        temp_quotes_dir = Path(storage_root) / "temp" / space_id / "quotes"
-                        temp_quotes_dir.mkdir(parents=True, exist_ok=True)
-                        
-                        all_quotes: List[str] = []
-                        completed_chunks = state.get('completed_chunks', [])
-                        
-                        # Process each chunk
-                        for i, chunk in enumerate(chunks):
-                            # Skip if chunk already completed
-                            if i in completed_chunks:
-                                logger.info(f"Skipping completed chunk {i+1}/{total_chunks}")
-                                continue
-                                
-                            logger.info(f"Processing chunk {i+1}/{total_chunks}")
+                    output_buffer = io.StringIO()
+                    with redirect_stdout(output_buffer), redirect_stderr(output_buffer):
+                        try:
+                            with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                                transcript = f.read()
+                            
+                            chunks = chunk_transcript(transcript)
+                            total_chunks = len(chunks)
+                            
                             state.update({
-                                'current_chunk': i,
-                                'progress': (i + 0.5) / total_chunks  # +0.5 to show chunk is in progress
+                                'total_chunks': total_chunks,
+                                'current_chunk': 0,
+                                'completed_chunks': []
                             })
                             save_process_state(storage_root, space_id, state)
                             
-                            # Generate quotes for this chunk
-                            chunk_quotes = create_quote_thread(chunk, {"url": url})
-                            if not chunk_quotes:
-                                raise Exception(f"Failed to generate quotes for chunk {i+1}")
+                            temp_quotes_dir = Path(storage_root) / "temp" / space_id / "quotes"
+                            temp_quotes_dir.mkdir(parents=True, exist_ok=True)
                             
-                            # Save chunk quotes to temporary file
-                            chunk_file = temp_quotes_dir / f"chunk_{i}.txt"
-                            with open(chunk_file, 'w', encoding='utf-8') as f:
-                                f.write('\n\n'.join(chunk_quotes))
+                            all_quotes: List[str] = []
+                            completed_chunks = state.get('completed_chunks', [])
                             
-                            # Update state to mark chunk as complete
-                            completed_chunks.append(i)
-                            state['completed_chunks'] = completed_chunks
-                            state['progress'] = (i + 1) / total_chunks
+                            for i, chunk in enumerate(chunks):
+                                if i in completed_chunks:
+                                    logger.info(f"Skipping completed chunk {i+1}/{total_chunks}")
+                                    output_buffer.write(f"\nSkipping completed chunk {i+1}/{total_chunks}")
+                                    continue
+                                    
+                                logger.info(f"Processing chunk {i+1}/{total_chunks}")
+                                output_buffer.write(f"\nProcessing chunk {i+1}/{total_chunks}")
+                                
+                                # Update state before API call
+                                state.update({
+                                    'current_chunk': i,
+                                    'progress': (i + 0.5) / total_chunks,
+                                    'console_output': output_buffer.getvalue()
+                                })
+                                save_process_state(storage_root, space_id, state)
+                                
+                                chunk_quotes = create_quote_thread(chunk, {"url": url})
+                                
+                                # Get latest output including API logs
+                                current_output = output_buffer.getvalue()
+                                state.update({
+                                    'current_chunk': i,
+                                    'progress': (i + 0.8) / total_chunks,
+                                    'console_output': current_output
+                                })
+                                save_process_state(storage_root, space_id, state)
+                                
+                                if not chunk_quotes:
+                                    raise Exception(f"Failed to generate quotes for chunk {i+1}")
+                                
+                                chunk_file = temp_quotes_dir / f"chunk_{i}.txt"
+                                with open(chunk_file, 'w', encoding='utf-8') as f:
+                                    f.write('\n\n'.join(chunk_quotes))
+                                
+                                completed_chunks.append(i)
+                                state['completed_chunks'] = completed_chunks
+                                state['progress'] = (i + 1) / total_chunks
+                                state['console_output'] = output_buffer.getvalue()
+                                save_process_state(storage_root, space_id, state)
+                                
+                                all_quotes.extend(chunk_quotes)
+                            
+                            if all_quotes:
+                                with open(paths['quotes_path'], 'w', encoding='utf-8') as f:
+                                    f.write('\n\n'.join(all_quotes))
+                                
+                                if temp_quotes_dir.parent.exists():
+                                    shutil.rmtree(str(temp_quotes_dir.parent), ignore_errors=True)
+                                
+                                update_progress("quotes", 1.0, "Quote generation complete", output_buffer.getvalue())
+                            else:
+                                raise Exception("No quotes were generated")
+                                
+                        except Exception as e:
+                            error_msg = f"Quote generation failed: {str(e)}\n{output_buffer.getvalue()}"
+                            logger.error(error_msg)
+                            state.update({
+                                'status': 'error',
+                                'error': error_msg,
+                                'progress': state['progress']
+                            })
                             save_process_state(storage_root, space_id, state)
-                            
-                            all_quotes.extend(chunk_quotes)
-                            
-                        # All chunks complete, save final quotes file
-                        if all_quotes:
-                            with open(paths['quotes_path'], 'w', encoding='utf-8') as f:
-                                f.write('\n\n'.join(all_quotes))
-                            
-                            # Clean up temporary files
-                            if temp_quotes_dir.parent.exists():
-                                shutil.rmtree(str(temp_quotes_dir.parent), ignore_errors=True)
-                            
-                            update_progress("quotes", 1.0, "Quote generation complete")
-                        else:
-                            raise Exception("No quotes were generated")
-                            
-                    except Exception as e:
-                        logger.error(f"Quote generation failed: {str(e)}")
-                        state.update({
-                            'status': 'error',
-                            'error': f'Quote generation failed: {str(e)}',
-                            'progress': state['progress']  # Keep progress for resuming
-                        })
-                        save_process_state(storage_root, space_id, state)
-                        raise
+                            raise
 
                 # Generate summary if needed
                 if not os.path.exists(paths['summary_path']):
                     logger.info("Starting summary generation")
                     update_progress("summary", 0.0, "Generating summary...")
                     
-                    from .summary import generate_summary
-                    
-                    try:
-                        # Read transcript and quotes
-                        with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
-                            transcript = f.read()
-                        with open(paths['quotes_path'], 'r', encoding='utf-8') as f:
-                            quotes_text = f.read()
-                            quotes = [q.strip() for q in quotes_text.split('\n\n') if q.strip()]
-                        
-                        # Generate summary
-                        summary = generate_summary(transcript, quotes, paths['summary_path'])
-                        if summary:
-                            update_progress("summary", 1.0, "Summary generation complete")
-                        else:
-                            logger.error("Failed to generate summary")
-                            update_progress("summary", 1.0, "Summary generation failed")
+                    output_buffer = io.StringIO()
+                    with redirect_stdout(output_buffer), redirect_stderr(output_buffer):
+                        try:
+                            with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                                transcript = f.read()
+                            with open(paths['quotes_path'], 'r', encoding='utf-8') as f:
+                                quotes_text = f.read()
+                                quotes = [q.strip() for q in quotes_text.split('\n\n') if q.strip()]
                             
-                    except Exception as e:
-                        logger.error(f"Summary generation failed: {str(e)}")
-                        state.update({
-                            'status': 'error',
-                            'error': f'Summary generation failed: {str(e)}',
-                            'progress': 0.0
-                        })
-                        save_process_state(storage_root, space_id, state)
-                        raise
+                            summary = generate_summary(transcript, quotes, paths['summary_path'])
+                            if summary:
+                                update_progress("summary", 1.0, "Summary generation complete", output_buffer.getvalue())
+                            else:
+                                logger.error("Failed to generate summary")
+                                update_progress("summary", 1.0, "Summary generation failed", output_buffer.getvalue())
+                                
+                        except Exception as e:
+                            error_msg = f"Summary generation failed: {str(e)}\n{output_buffer.getvalue()}"
+                            logger.error(error_msg)
+                            state.update({
+                                'status': 'error',
+                                'error': error_msg,
+                                'progress': 0.0
+                            })
+                            save_process_state(storage_root, space_id, state)
+                            raise
 
                 # Update final state
                 state.update({

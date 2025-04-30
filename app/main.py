@@ -140,24 +140,26 @@ if check_password():
 
     logger.info("Initializing session state...")
     # Initialize session state for progress tracking
-    if not hasattr(st.session_state, 'processing_complete'):
-        setattr(st.session_state, 'processing_complete', False)
-    if not hasattr(st.session_state, 'current_space_id'):
-        setattr(st.session_state, 'current_space_id', None)
-    if not hasattr(st.session_state, 'download_progress'):
-        setattr(st.session_state, 'download_progress', 0.0)
-    if not hasattr(st.session_state, 'total_fragments'):
-        setattr(st.session_state, 'total_fragments', 0)
-    if not hasattr(st.session_state, 'current_fragment'):
-        setattr(st.session_state, 'current_fragment', 0)
-    if not hasattr(st.session_state, 'regenerating_quotes'):
-        setattr(st.session_state, 'regenerating_quotes', False)
-    if not hasattr(st.session_state, 'selected_media'):
-        setattr(st.session_state, 'selected_media', None)
-    if not hasattr(st.session_state, 'url_history'):
-        setattr(st.session_state, 'url_history', {})
-    if not hasattr(st.session_state, 'loaded_space_id'):
-        setattr(st.session_state, 'loaded_space_id', None)
+    if 'processing_complete' not in st.session_state:
+        st.session_state.processing_complete = False
+    if 'current_space_id' not in st.session_state:
+        st.session_state.current_space_id = None
+    if 'download_progress' not in st.session_state:
+        st.session_state.download_progress = 0.0
+    if 'total_fragments' not in st.session_state:
+        st.session_state.total_fragments = 0
+    if 'current_fragment' not in st.session_state:
+        st.session_state.current_fragment = 0
+    if 'regenerating_quotes' not in st.session_state:
+        st.session_state.regenerating_quotes = False
+    if 'selected_media' not in st.session_state:
+        st.session_state.selected_media = None
+    if 'url_history' not in st.session_state:
+        st.session_state.url_history = {}
+    if 'loaded_space_id' not in st.session_state:
+        st.session_state.loaded_space_id = None
+    if 'active_processes' not in st.session_state:
+        st.session_state.active_processes = []
 
     logger.info("Creating storage directories...")
     # Create persistent storage directories
@@ -320,122 +322,185 @@ if check_password():
                 if stage == 'download':
                     st.info("⬇️ Downloading Media")
                     st.progress(progress)
-                    st.caption(str(stage_status))  # Show detailed status (speed, etc.)
+                    # Show download output in collapsible section
+                    with st.expander("Download Details", expanded=False):
+                        st.caption(str(stage_status))
+                        if state.get('console_output'):
+                            with stylable_container(
+                                key="download_output",
+                                css_styles="""
+                                    code {
+                                        white-space: pre-wrap !important;
+                                        max-height: 200px;
+                                        overflow-y: auto;
+                                    }
+                                    """
+                            ):
+                                st.code(state['console_output'], language="text")
+                
                 elif stage == 'transcribe':
                     st.info("🎯 Transcribing Audio")
                     st.progress(progress)
                     
-                    # Show transcription details
-                    last_updated_str = state.get('last_updated')
-                    if last_updated_str:
-                        last_updated = datetime.fromisoformat(last_updated_str)
-                        time_since = datetime.now() - last_updated
-                        
-                        # Show elapsed time with appropriate units
-                        if time_since < timedelta(minutes=1):
-                            elapsed = f"{time_since.seconds} seconds"
-                        elif time_since < timedelta(hours=1):
-                            elapsed = f"{time_since.seconds // 60} minutes"
-                        else:
-                            elapsed = f"{time_since.seconds // 3600} hours"
-                        
-                        # Show file being transcribed
-                        if files.get('audio', False):
-                            paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
-                            audio_path = paths['audio_path']
-                            file_size = os.path.getsize(audio_path) / (1024 * 1024)  # Convert to MB
-                            st.caption(f"🎵 Transcribing: {Path(audio_path).name} ({file_size:.1f} MB)")
-                        
-                        # Show elapsed time and model info
-                        st.caption(f"⏱️ Elapsed time: {elapsed}")
-                        st.caption("🤖 Using OpenAI Whisper base model")
+                    # Show transcription details in collapsible section
+                    with st.expander("Transcription Details", expanded=False):
+                        # Show transcription details
+                        last_updated_str = state.get('last_updated')
+                        if last_updated_str:
+                            last_updated = datetime.fromisoformat(last_updated_str)
+                            time_since = datetime.now() - last_updated
+                            
+                            # Show elapsed time with appropriate units
+                            if time_since < timedelta(minutes=1):
+                                elapsed = f"{time_since.seconds} seconds"
+                            elif time_since < timedelta(hours=1):
+                                elapsed = f"{time_since.seconds // 60} minutes"
+                            else:
+                                elapsed = f"{time_since.seconds // 3600} hours"
+                            
+                            # Show file being transcribed
+                            if files.get('audio', False):
+                                paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
+                                audio_path = paths['audio_path']
+                                file_size = os.path.getsize(audio_path) / (1024 * 1024)  # Convert to MB
+                                st.caption(f"🎵 Transcribing: {Path(audio_path).name} ({file_size:.1f} MB)")
+                            
+                            # Show elapsed time and model info
+                            st.caption(f"⏱️ Elapsed time: {elapsed}")
+                            st.caption("🤖 Using OpenAI Whisper base model")
+                            
+                            # Show console output if available
+                            if state.get('console_output'):
+                                with stylable_container(
+                                    key="transcribe_output",
+                                    css_styles="""
+                                        code {
+                                            white-space: pre-wrap !important;
+                                            max-height: 200px;
+                                            overflow-y: auto;
+                                        }
+                                        """
+                                ):
+                                    st.code(state['console_output'], language="text")
                     
                     st.caption(str(stage_status))
+                
                 elif stage == 'quotes':
                     st.info("✍️ Generating Quotes")
                     st.progress(progress)
                     
-                    # Show quote generation details
-                    last_updated_str = state.get('last_updated')
-                    if last_updated_str:
-                        last_updated = datetime.fromisoformat(last_updated_str)
-                        time_since = datetime.now() - last_updated
-                        
-                        # Show elapsed time with appropriate units
-                        if time_since < timedelta(minutes=1):
-                            elapsed = f"{time_since.seconds} seconds"
-                        elif time_since < timedelta(hours=1):
-                            elapsed = f"{time_since.seconds // 60} minutes"
-                        else:
-                            elapsed = f"{time_since.seconds // 3600} hours"
-                        
-                        # Show transcript details
-                        if files.get('transcript', False):
-                            paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
-                            transcript_path = paths['transcript_path']
-                            with open(transcript_path, 'r', encoding='utf-8') as f:
-                                transcript = f.read()
+                    # Show quote generation details in collapsible section
+                    with st.expander("Quote Generation Details", expanded=True):
+                        last_updated_str = state.get('last_updated')
+                        if last_updated_str:
+                            last_updated = datetime.fromisoformat(last_updated_str)
+                            time_since = datetime.now() - last_updated
                             
-                            # Get chunk information
-                            chunks = chunk_transcript(transcript)
-                            total_chunks = len(chunks)
-                            current_chunk = int(progress * total_chunks) if progress > 0 else 0
+                            # Show elapsed time with appropriate units
+                            if time_since < timedelta(minutes=1):
+                                elapsed = f"{time_since.seconds} seconds"
+                            elif time_since < timedelta(hours=1):
+                                elapsed = f"{time_since.seconds // 60} minutes"
+                            else:
+                                elapsed = f"{time_since.seconds // 3600} hours"
                             
-                            # Show chunk progress
-                            st.caption(f"📊 Processing chunk {current_chunk}/{total_chunks}")
-                            st.caption(f"📝 Total transcript length: {len(transcript):,} characters")
+                            # Show transcript details
+                            if files.get('transcript', False):
+                                paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
+                                transcript_path = paths['transcript_path']
+                                with open(transcript_path, 'r', encoding='utf-8') as f:
+                                    transcript = f.read()
+                                
+                                # Get chunk information
+                                chunks = chunk_transcript(transcript)
+                                total_chunks = len(chunks)
+                                current_chunk = int(progress * total_chunks) if progress > 0 else 0
+                                
+                                # Show chunk progress
+                                st.caption(f"📊 Processing chunk {current_chunk}/{total_chunks}")
+                                st.caption(f"📝 Total transcript length: {len(transcript):,} characters")
+                            
+                            # Show elapsed time and model info
+                            st.caption(f"⏱️ Elapsed time: {elapsed}")
+                            st.caption("🤖 Using DeepSeek for quote extraction")
+                            
+                            # Show console output if available
+                            if state.get('console_output'):
+                                with stylable_container(
+                                    key="quotes_output",
+                                    css_styles="""
+                                        code {
+                                            white-space: pre-wrap !important;
+                                            max-height: 400px;
+                                            overflow-y: auto;
+                                        }
+                                        """
+                                ):
+                                    st.code(state['console_output'], language="text")
                         
-                        # Show elapsed time and model info
-                        st.caption(f"⏱️ Elapsed time: {elapsed}")
-                        st.caption("🤖 Using DeepSeek for quote extraction")
-                    
-                    st.caption(str(stage_status))
+                        st.caption(str(stage_status))
+                
                 elif stage == 'summary':
                     st.info("📝 Creating Summary")
                     st.progress(progress)
                     
-                    # Show summary generation details
-                    last_updated_str = state.get('last_updated')
-                    if last_updated_str:
-                        last_updated = datetime.fromisoformat(last_updated_str)
-                        time_since = datetime.now() - last_updated
-                        
-                        # Show elapsed time with appropriate units
-                        if time_since < timedelta(minutes=1):
-                            elapsed = f"{time_since.seconds} seconds"
-                        elif time_since < timedelta(hours=1):
-                            elapsed = f"{time_since.seconds // 60} minutes"
-                        else:
-                            elapsed = f"{time_since.seconds // 3600} hours"
-                        
-                        # Show input details
-                        if files.get('transcript', False) and files.get('quotes', False):
-                            paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
+                    # Show summary generation details in collapsible section
+                    with st.expander("Summary Generation Details", expanded=False):
+                        last_updated_str = state.get('last_updated')
+                        if last_updated_str:
+                            last_updated = datetime.fromisoformat(last_updated_str)
+                            time_since = datetime.now() - last_updated
                             
-                            # Show transcript info
-                            with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
-                                transcript = f.read()
-                            st.caption(f"📝 Processing transcript: {len(transcript):,} characters")
+                            # Show elapsed time with appropriate units
+                            if time_since < timedelta(minutes=1):
+                                elapsed = f"{time_since.seconds} seconds"
+                            elif time_since < timedelta(hours=1):
+                                elapsed = f"{time_since.seconds // 60} minutes"
+                            else:
+                                elapsed = f"{time_since.seconds // 3600} hours"
                             
-                            # Show quotes info
-                            quotes = read_quotes(paths['quotes_path'])
-                            st.caption(f"✍️ Using {len(quotes)} generated quotes")
+                            # Show input details
+                            if files.get('transcript', False) and files.get('quotes', False):
+                                paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
+                                
+                                # Show transcript info
+                                with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                                    transcript = f.read()
+                                st.caption(f"📝 Processing transcript: {len(transcript):,} characters")
+                                
+                                # Show quotes info
+                                quotes = read_quotes(paths['quotes_path'])
+                                st.caption(f"✍️ Using {len(quotes)} generated quotes")
+                            
+                            # Show elapsed time and model info
+                            st.caption(f"⏱️ Elapsed time: {elapsed}")
+                            st.caption("🤖 Using DeepSeek for summarization")
+                            
+                            # Show console output if available
+                            if state.get('console_output'):
+                                with stylable_container(
+                                    key="summary_output",
+                                    css_styles="""
+                                        code {
+                                            white-space: pre-wrap !important;
+                                            max-height: 200px;
+                                            overflow-y: auto;
+                                        }
+                                        """
+                                ):
+                                    st.code(state['console_output'], language="text")
+                            
+                            # Show stages of summary generation
+                            if progress < 0.3:
+                                st.caption("📊 Analyzing transcript...")
+                            elif progress < 0.6:
+                                st.caption("📝 Extracting key points...")
+                            elif progress < 0.9:
+                                st.caption("✨ Generating overview...")
+                            else:
+                                st.caption("💾 Saving summary...")
                         
-                        # Show elapsed time and model info
-                        st.caption(f"⏱️ Elapsed time: {elapsed}")
-                        st.caption("�� Using DeepSeek for summarization")
-                        
-                        # Show stages of summary generation
-                        if progress < 0.3:
-                            st.caption("📊 Analyzing transcript...")
-                        elif progress < 0.6:
-                            st.caption("📝 Extracting key points...")
-                        elif progress < 0.9:
-                            st.caption("✨ Generating overview...")
-                        else:
-                            st.caption("💾 Saving summary...")
-                    
-                    st.caption(str(stage_status))
+                        st.caption(str(stage_status))
                 else:
                     stage_display = stage if stage else "Unknown"
                     st.info(f"🔄 Processing: {stage_display} ({progress*100:.0f}%)")
@@ -446,11 +511,44 @@ if check_password():
                     st.markdown("#### File Status")
                     cols = st.columns([1, 1, 1, 1])
                     file_types = ['audio', 'transcript', 'quotes', 'summary']
+                    file_icons = {
+                        'audio': '🎵',
+                        'transcript': '📝',
+                        'quotes': '✍️',
+                        'summary': '📋'
+                    }
                     for i, file_type in enumerate(file_types):
                         with cols[i]:
                             exists = files.get(file_type, False)
                             icon = "✅" if exists else "❌"
-                            st.markdown(f"**{icon} {file_type.title()}**")
+                            emoji = file_icons.get(file_type, '')
+                            
+                            # Add processing indicator for current stage
+                            if stage and stage.lower() == file_type:
+                                st.markdown(f"**{icon} {emoji} {file_type.title()}** 🔄")
+                            else:
+                                st.markdown(f"**{icon} {emoji} {file_type.title()}**")
+                            
+                            # Show file size if exists
+                            if exists:
+                                try:
+                                    paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
+                                    # Type-safe path access based on file type
+                                    if file_type == 'audio':
+                                        size = Path(paths['audio_path']).stat().st_size / 1024  # KB
+                                    elif file_type == 'transcript':
+                                        size = Path(paths['transcript_path']).stat().st_size / 1024  # KB
+                                    elif file_type == 'quotes':
+                                        size = Path(paths['quotes_path']).stat().st_size / 1024  # KB
+                                    elif file_type == 'summary':
+                                        size = Path(paths['summary_path']).stat().st_size / 1024  # KB
+                                    
+                                    if size > 1024:
+                                        st.caption(f"{size/1024:.1f} MB")
+                                    else:
+                                        st.caption(f"{size:.1f} KB")
+                                except Exception:
+                                    pass
                 
                 # Show last update time if available
                 last_updated_str = state.get('last_updated')
@@ -480,11 +578,21 @@ if check_password():
                                 st.markdown(f"✅ {file_type.title()}")
                 
                 if st.button("🔄 Retry Processing"):
+                    # Check current file status
+                    paths = get_storage_paths(str(STORAGE_DIR), space_id)
+                    files_exist = {
+                        'audio': os.path.exists(paths['audio_path']),
+                        'transcript': os.path.exists(paths['transcript_path']),
+                        'quotes': os.path.exists(paths['quotes_path']),
+                        'summary': os.path.exists(paths['summary_path'])
+                    }
                     # Clear error state but preserve file status
                     state.update({
-                        'status': 'not_started',
+                        'status': 'processing',
+                        'stage': None,
                         'error': None,
-                        'progress': 0.0
+                        'progress': 0.0,
+                        'files': files_exist
                     })
                     save_process_state(str(STORAGE_DIR), space_id, state)
                     st.rerun()
@@ -498,10 +606,20 @@ if check_password():
                               if not files.get(file_type, False)]
                     st.warning(f"⚠️ Processing marked complete but missing files: {', '.join(missing)}")
                     if st.button("🔄 Reprocess Missing Files"):
+                        # Check current file status
+                        paths = get_storage_paths(str(STORAGE_DIR), space_id)
+                        files_exist = {
+                            'audio': os.path.exists(paths['audio_path']),
+                            'transcript': os.path.exists(paths['transcript_path']),
+                            'quotes': os.path.exists(paths['quotes_path']),
+                            'summary': os.path.exists(paths['summary_path'])
+                        }
                         state.update({
-                            'status': 'not_started',
+                            'status': 'processing',
+                            'stage': None,
                             'error': None,
-                            'progress': 0.0
+                            'progress': 0.0,
+                            'files': files_exist
                         })
                         save_process_state(str(STORAGE_DIR), space_id, state)
                         st.rerun()
@@ -517,6 +635,14 @@ if check_password():
             if state['status'] == 'processing':
                 display_process_state(state, _progress_container)
                 st.info("⏳ This URL is already being processed. You can view its progress in the sidebar.")
+                
+                # Create progress callback and resume processing
+                progress_callback = StreamlitProgressCallback(_progress_container)
+                result_paths = process_space(url, str(STORAGE_DIR), progress_callback)
+                
+                if result_paths:
+                    st.session_state.processing_complete = True
+                    return result_paths
                 return None
             
             # Check if all files already exist
@@ -525,6 +651,24 @@ if check_password():
                 st.success("✅ All files already exist for this URL!")
                 st.session_state.processing_complete = True
                 return storage_paths
+            
+            # Check for partial completion and resume
+            files_exist = {
+                'audio': os.path.exists(storage_paths['audio_path']),
+                'transcript': os.path.exists(storage_paths['transcript_path']),
+                'quotes': os.path.exists(storage_paths['quotes_path']),
+                'summary': os.path.exists(storage_paths['summary_path'])
+            }
+            
+            # Reset state to resume processing
+            state.update({
+                'status': 'processing',
+                'stage': None,  # Let process_space determine the next stage
+                'error': None,
+                'progress': 0.0,
+                'files': files_exist
+            })
+            save_process_state(str(STORAGE_DIR), space_id, state)
             
             # Create progress callback
             progress_callback = StreamlitProgressCallback(_progress_container)
@@ -649,27 +793,49 @@ if check_password():
                     space_id = state_file.stem
                     state = get_process_state(str(STORAGE_DIR), space_id)
                     
-                    # Check if process is running or recently updated
-                    if state['status'] in ['processing', 'error']:
-                        last_updated_str = state.get('last_updated')
-                        if last_updated_str:
-                            last_updated = datetime.fromisoformat(last_updated_str)
-                            time_since_update = datetime.now() - last_updated
-                            logger.debug(f"Time since last update: {time_since_update}")
+                    # Get original URL if available
+                    original_url = get_url_from_history(space_id)
+                    
+                    # Check if process needs to be resumed
+                    if state['status'] == 'processing':
+                        # Check if files exist but are incomplete
+                        storage_paths = get_storage_paths(str(STORAGE_DIR), space_id)
+                        files_exist = {
+                            'audio': os.path.exists(storage_paths['audio_path']),
+                            'transcript': os.path.exists(storage_paths['transcript_path']),
+                            'quotes': os.path.exists(storage_paths['quotes_path']),
+                            'summary': os.path.exists(storage_paths['summary_path'])
+                        }
+                        
+                        # If we have some files but not all, this process needs to be resumed
+                        if any(files_exist.values()) and not all(files_exist.values()):
+                            logger.info(f"Found incomplete process {space_id} that needs resuming")
+                            processing_spaces.append((space_id, state, original_url))
                             
-                            # Consider process active if updated in last hour or has error status
-                            if time_since_update <= timedelta(hours=1) or state['status'] == 'error':
-                                # Get original URL if available
-                                original_url = get_url_from_history(space_id)
-                                logger.debug(f"Adding active process: {space_id} - {original_url}")
-                                processing_spaces.append((space_id, state, original_url))
-                            else:
-                                logger.debug(f"Skipping stale process: {space_id}")
+                            # Update session state
+                            if space_id not in [p[0] for p in st.session_state.active_processes]:
+                                st.session_state.active_processes.append((space_id, state, original_url))
+                        else:
+                            # Check if recently updated
+                            last_updated_str = state.get('last_updated')
+                            if last_updated_str:
+                                last_updated = datetime.fromisoformat(last_updated_str)
+                                time_since_update = datetime.now() - last_updated
+                                
+                                # Consider active if updated in last hour
+                                if time_since_update <= timedelta(hours=1):
+                                    logger.info(f"Found active process {space_id}")
+                                    processing_spaces.append((space_id, state, original_url))
+                                    
+                                    # Update session state
+                                    if space_id not in [p[0] for p in st.session_state.active_processes]:
+                                        st.session_state.active_processes.append((space_id, state, original_url))
+                    
                 except Exception as e:
                     logger.error(f"Error checking state file {state_file}: {e}")
                     continue
-                
-            logger.info(f"Found {len(processing_spaces)} active processing spaces")
+            
+            logger.info(f"Found {len(processing_spaces)} active/resumable processes")
             return processing_spaces
             
         except Exception as e:
@@ -690,273 +856,250 @@ if check_password():
     st.title("🎙️ LinkToQuote")
     st.write("Generate quotes and clips from any media url -  no listening required!")
 
-    # Add persistent status indicator
+    # Add persistent status indicator and resume processes
     logger.debug("Checking for active processes...")
     processing_spaces = find_processing_spaces()
-    if processing_spaces:
+    
+    # Auto-resume any in-progress processes
+    for space_id, state, original_url in processing_spaces:
+        if state['status'] == 'processing':
+            logger.info(f"Auto-resuming process for {space_id} ({original_url})")
+            # Create a container for this process
+            with st.sidebar:
+                process_container = st.container()
+                with process_container:
+                    st.info(f"🔄 Resuming: {original_url[:50]}...")
+                    progress_callback = StreamlitProgressCallback(process_container)
+                    # Resume processing in the background
+                    try:
+                        result_paths = process_space(original_url, str(STORAGE_DIR), progress_callback)
+                        if result_paths:
+                            st.success("✅ Process resumed and completed successfully!")
+                        else:
+                            st.error("❌ Process failed to resume. Check the logs for details.")
+                    except Exception as e:
+                        st.error(f"❌ Error resuming process: {str(e)}")
+
+    # Update sidebar with active processes
+    if st.session_state.active_processes:
         with st.sidebar:
             st.markdown("### 🔄 Active Processes")
-            for space_id, state, original_url in processing_spaces:
+            for space_id, state, original_url in st.session_state.active_processes:
                 with st.container():
+                    # Check if process is still active
+                    current_state = get_process_state(str(STORAGE_DIR), space_id)
+                    if current_state['status'] not in ['processing', 'error']:
+                        continue
+                        
                     if original_url:
                         st.info(f"🔗 Processing: {original_url[:50]}...")
                     else:
                         st.info(f"🔄 Processing space: {space_id[:8]}")
-                    stage_display = state['stage'] if state['stage'] is not None else "Unknown"
-                    st.progress(state['progress'], f"{stage_display.title()}: {state['progress']*100:.0f}%")
+                        
+                    # Show stage and progress
+                    stage = current_state.get('stage')
+                    progress = current_state.get('progress', 0.0)
+                    stage_display = stage if stage else "Unknown"
+                    st.progress(progress, f"{stage_display.title()}: {progress*100:.0f}%")
+                    
+                    # Add view details button
                     if st.button("📂 View Details", key=f"view_{space_id}_sidebar"):
+                        # Update session state
                         st.session_state.current_space_id = space_id
-                        st.session_state.processing_complete = False
-                        st.rerun()
-            st.markdown("---")
+                        st.session_state.processing_complete = current_state['status'] == 'complete'
+                        # Load the URL from history
+                        st.session_state.url_history = load_url_history()
+                        # Set the space URL for display
+                        space_url = st.session_state.url_history.get(space_id, '')
+                        if space_url:
+                            st.session_state.selected_option = "New URL"  # Reset dropdown
+                            # Force main area update
+                            st.rerun()
+                    
+                    # Show last update time
+                    last_updated_str = current_state.get('last_updated')
+                    if last_updated_str:
+                        last_updated = datetime.fromisoformat(last_updated_str)
+                        time_since = datetime.now() - last_updated
+                        if time_since < timedelta(minutes=1):
+                            st.caption(f"Last updated: {time_since.seconds} seconds ago")
+                        elif time_since < timedelta(hours=1):
+                            st.caption(f"Last updated: {time_since.seconds // 60} minutes ago")
+                        else:
+                            st.caption(f"Last updated: {time_since.seconds // 3600} hours ago")
+                
+                st.markdown("---")
 
     # Create tabs for main content and sidebar content
     main_tab, summary_tab, logs_tab, history_tab, help_tab = st.tabs(["🎯 Main", "📝 Summary", "🔍 Logs", "📚 History", "❓ Help"])
 
     with main_tab:
-        # Load existing media files and their URLs
-        media_files = list(DOWNLOADS_DIR.glob("*.mp3")) if DOWNLOADS_DIR.exists() else []
-        url_history = load_url_history()
-        
-        # Create two columns for input methods
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            # URL input
-            space_url = st.text_input("Paste Media URL:", placeholder="https://x.com/i/status/1915404626754494957")
-            if space_url:  # If URL is pasted, automatically select "New URL"
-                st.session_state.selected_option = "New URL"
-        
-        with col2:
-            if media_files:
-                # Create dropdown for previous URLs
-                options = ["New URL"]
-                options.extend([f"{url_history.get(Path(f).stem, 'Unknown URL')} - {Path(f).stem}" 
-                              for f in media_files])
-                
-                selected_option = st.selectbox(
-                    "Or select previous:",
-                    options,
-                    index=0 if space_url else None,  # Default to "New URL" if URL is pasted
-                    key="selected_option",  # Add key to track state
-                    help="Select a previously processed media file",
-                    format_func=lambda x: x if x == "New URL" else f"{x.split(' - ')[0]} - {x.split(' - ')[1][:8]}"  # Only clip hash for display
-                )
-                
-                if selected_option and selected_option != "New URL":  # Check for None and "New URL"
-                    space_id = selected_option.split(" - ")[1]  # Get the full hash
-                    space_url = url_history.get(space_id, "")
-                    if st.button("📂 Load Selected"):
-                        paths = load_previous_media(space_id)
-                        if paths:
-                            st.rerun()
-
-        # Handle URL input or loaded media
-        if space_url or st.session_state.loaded_space_id:
-            # Get space ID with proper type checking
-            current_id = get_space_id(space_url) if space_url else st.session_state.loaded_space_id
-            if not isinstance(current_id, str):
-                st.error("Invalid space ID")
-                st.stop()
+        # If we have a current_space_id from sidebar, load its details
+        if st.session_state.current_space_id:
+            space_id = st.session_state.current_space_id
+            state = get_process_state(str(STORAGE_DIR), space_id)
+            space_url = st.session_state.url_history.get(space_id, '')
             
-            space_id = current_id  # Now space_id is definitely str
-            state = check_process_state(space_id)
+            # Show the URL in the input field
+            if space_url:
+                st.text_input("Paste Media URL:", value=space_url, key="url_input")
             
-            # Save URL to history when processing new media
-            if space_url and space_id != st.session_state.current_space_id:
-                save_url_history(space_id, space_url)
-                st.session_state.current_space_id = space_id
-                
-                # Only reset state if not already processing
-                if state['status'] != 'processing':
-                    st.session_state.processing_complete = False
-                    st.session_state.download_progress = 0
-                    st.session_state.total_fragments = 0
-                    st.session_state.current_fragment = 0
-
-            if not st.session_state.processing_complete and state['status'] != 'complete':
-                progress_container = st.container()
-                with st.status("Processing media...", expanded=True) as status:
-                    try:
-                        # Display current state if processing
-                        if state['status'] == 'processing':
-                            display_process_state(state, progress_container)
-                        else:
-                            process_result = process_space_with_ui(space_url, progress_container)
-                            if process_result:
-                                st.session_state.processing_complete = True
-                                st.success("✅ Space processed successfully!")
-                                
-                                # Check if we need to generate summary
-                                if st.session_state.current_space_id is not None:
-                                    storage_paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
-                                    if not os.path.exists(storage_paths['summary_path']):
-                                        if os.path.exists(storage_paths['transcript_path']) and os.path.exists(storage_paths['quotes_path']):
-                                            with st.spinner("Generating summary..."):
-                                                with open(storage_paths['transcript_path'], 'r', encoding='utf-8') as f:
-                                                    transcript = f.read()
-                                                quotes = read_quotes(storage_paths['quotes_path'])
-                                                
-                                                summary = generate_summary(transcript, quotes, storage_paths['summary_path'])
-                                                
-                                                if summary['overview'] != "Error generating summary":
-                                                    save_summary(summary, storage_paths['summary_path'])
-                                                    st.success("✨ Summary generated successfully!")
-                                                else:
-                                                    st.error("Failed to generate summary. Please try manually.")
-                    except Exception as e:
-                        st.error(f"Error processing Space: {str(e)}")
-                        status.update(label="Error!", state="error")
-                        st.session_state.processing_complete = False
-
-            # If processing is complete or media was loaded, show results
-            if st.session_state.processing_complete:
-                storage_paths = get_storage_paths(str(STORAGE_DIR), space_id)
-                
-                # Show original URL for loaded content
-                if st.session_state.loaded_space_id:
-                    original_url = get_url_from_history(space_id)
-                    st.info(f"🔗 Loaded content from: {original_url}")
-
-                # Display tabs for different outputs
-                content_tab1, content_tab2, content_tab3 = st.tabs(["📝 Quotes", "🎵 Audio", "📄 Transcript"])
-                
-                with content_tab1:
-                    st.subheader("Generated Quotes")
-                    if os.path.exists(storage_paths['quotes_path']):
-                        # Add regenerate button at the top
-                        col1, col2 = st.columns([4, 1])
-                        with col2:
-                            if st.button("Regenerate", key="regenerate_quotes"):
-                                st.session_state.regenerating_quotes = True
-                                
-                                # Create containers for progress and logs
-                                status_container = st.empty()
-                                progress_container = st.empty()
-                                log_container = st.empty()
-                                
-                                with st.spinner("Regenerating quotes..."):
-                                    # Create progress bar
-                                    progress_bar = progress_container.progress(0)
-                                    
-                                    # Read transcript
-                                    status_container.info("Reading transcript...")
-                                    progress_bar.progress(0.2)
-                                    
-                                    try:
-                                        # Create a log expander
-                                        with log_container.expander("Generation Logs", expanded=True):
-                                            st.write("Starting quote generation...")
+            # Show process status
+            progress_container = st.container()
+            with st.status("Processing media...", expanded=True) as status:
+                try:
+                    # Display current state
+                    display_process_state(state, progress_container)
+                    
+                    # If process is complete, show results
+                    if state['status'] == 'complete':
+                        st.session_state.processing_complete = True
+                        storage_paths = get_storage_paths(str(STORAGE_DIR), space_id)
+                        if all(os.path.exists(str(p)) for p in storage_paths.values()):
+                            st.success("✅ Space processed successfully!")
+                            # Display results tabs
+                            content_tab1, content_tab2, content_tab3 = st.tabs(["📝 Quotes", "🎵 Audio", "📄 Transcript"])
+                            
+                            with content_tab1:
+                                st.subheader("Generated Quotes")
+                                if os.path.exists(storage_paths['quotes_path']):
+                                    # Add regenerate button at the top
+                                    col1, col2 = st.columns([4, 1])
+                                    with col2:
+                                        if st.button("Regenerate", key="regenerate_quotes"):
+                                            st.session_state.regenerating_quotes = True
                                             
-                                            # Capture stdout to show logs
-                                            import io
-                                            import sys
-                                            old_stdout = sys.stdout
-                                            sys.stdout = mystdout = io.StringIO()
+                                            # Create containers for progress and logs
+                                            status_container = st.empty()
+                                            progress_container = st.empty()
+                                            log_container = st.empty()
                                             
-                                            try:
-                                                quotes = regenerate_quotes(
-                                                    storage_paths['transcript_path'],
-                                                    storage_paths['quotes_path'],
-                                                    space_url
-                                                )
+                                            with st.spinner("Regenerating quotes..."):
+                                                # Create progress bar
+                                                progress_bar = progress_container.progress(0)
                                                 
-                                                # Get the logs
-                                                logs = mystdout.getvalue()
-                                                with stylable_container(
-                                                    key="generation_logs",
-                                                    css_styles="""
-                                                        code {
-                                                            white-space: pre-wrap !important;
-                                                        }
-                                                        """
-                                                ):
-                                                    st.code(logs)
+                                                # Read transcript
+                                                status_container.info("Reading transcript...")
+                                                progress_bar.progress(0.2)
                                                 
-                                                if quotes:
-                                                    status_container.success("✨ Quotes regenerated successfully!")
+                                                try:
+                                                    # Create a log expander
+                                                    with log_container.expander("Generation Logs", expanded=True):
+                                                        st.write("Starting quote generation...")
+                                                        
+                                                        # Capture stdout to show logs
+                                                        import io
+                                                        import sys
+                                                        old_stdout = sys.stdout
+                                                        sys.stdout = mystdout = io.StringIO()
+                                                        
+                                                        try:
+                                                            quotes = regenerate_quotes(
+                                                                storage_paths['transcript_path'],
+                                                                storage_paths['quotes_path'],
+                                                                space_url
+                                                            )
+                                                            
+                                                            # Get the logs
+                                                            logs = mystdout.getvalue()
+                                                            with stylable_container(
+                                                                key="generation_logs",
+                                                                css_styles="""
+                                                                    code {
+                                                                        white-space: pre-wrap !important;
+                                                                    }
+                                                                    """
+                                                            ):
+                                                                st.code(logs)
+                                                            
+                                                            if quotes:
+                                                                status_container.success("✨ Quotes regenerated successfully!")
+                                                                progress_bar.progress(1.0)
+                                                            else:
+                                                                status_container.error("❌ Failed to generate quotes. Check the logs for details.")
+                                                                progress_bar.progress(1.0)
+                                                                
+                                                        finally:
+                                                            sys.stdout = old_stdout
+                                                
+                                                except Exception as e:
+                                                    status_container.error(f"❌ Error: {str(e)}")
                                                     progress_bar.progress(1.0)
-                                                else:
-                                                    status_container.error("❌ Failed to generate quotes. Check the logs for details.")
-                                                    progress_bar.progress(1.0)
-                                                    
-                                            finally:
-                                                sys.stdout = old_stdout
+                                                
+                                            st.session_state.regenerating_quotes = False
+                                            time.sleep(1)  # Give time for status messages to be read
+                                            st.rerun()
                                     
-                                    except Exception as e:
-                                        status_container.error(f"❌ Error: {str(e)}")
-                                        progress_bar.progress(1.0)
+                                    # Read and display quotes in the main container
+                                    quotes = read_quotes(storage_paths['quotes_path'])
+                                    if quotes:  # Only try to display if we have quotes
+                                        display_quotes(quotes, st.container())
+                                    else:
+                                        st.warning("No quotes found in the file. Try regenerating the quotes.")
+                            
+                            with content_tab2:
+                                st.subheader("Audio")
+                                if os.path.exists(storage_paths['audio_path']):
+                                    audio_size = os.path.getsize(storage_paths['audio_path']) / (1024 * 1024)  # MB
+                                    st.write(f"Audio file size: {audio_size:.1f} MB")
                                     
-                                st.session_state.regenerating_quotes = False
-                                time.sleep(1)  # Give time for status messages to be read
-                                st.rerun()
-                        
-                        # Read and display quotes in the main container
-                        quotes = read_quotes(storage_paths['quotes_path'])
-                        if quotes:  # Only try to display if we have quotes
-                            display_quotes(quotes, st.container())
-                        else:
-                            st.warning("No quotes found in the file. Try regenerating the quotes.")
+                                    with open(storage_paths['audio_path'], 'rb') as audio_file:
+                                        audio_data = audio_file.read()
+                                        st.download_button(
+                                            "⬇️ Download Full Recording",
+                                            audio_data,
+                                            file_name=f"space_{space_id[:8]}.mp3",
+                                            mime="audio/mpeg"
+                                        )
+                            
+                            with content_tab3:
+                                st.subheader("Transcript")
+                                if os.path.exists(storage_paths['transcript_path']):
+                                    with open(storage_paths['transcript_path'], 'r') as f:
+                                        transcript = f.read()
+                                    
+                                    # Split transcript into chunks
+                                    chunks = chunk_transcript(transcript)
+                                    total_chunks = len(chunks)
+                                    
+                                    # Add chunk navigation
+                                    col1, col2 = st.columns([3, 1])
+                                    with col1:
+                                        st.write(f"Transcript length: {len(transcript):,} characters ({total_chunks} pages)")
+                                    with col2:
+                                        chunk_idx = st.number_input("Page", min_value=1, max_value=total_chunks, value=1) - 1
+                                    
+                                    # Show current chunk with some context
+                                    st.text_area(
+                                        f"Transcript (Page {chunk_idx + 1}/{total_chunks})", 
+                                        chunks[chunk_idx],
+                                        height=400
+                                    )
+                                    
+                                    # Navigation buttons
+                                    col1, col2, col3 = st.columns([1, 2, 1])
+                                    with col1:
+                                        if chunk_idx > 0:
+                                            if st.button("⬅️ Previous Page"):
+                                                st.session_state.chunk_idx = max(0, chunk_idx - 1)
+                                                st.rerun()
+                                    with col3:
+                                        if chunk_idx < total_chunks - 1:
+                                            if st.button("Next Page ➡️"):
+                                                st.session_state.chunk_idx = min(total_chunks - 1, chunk_idx + 1)
+                                                st.rerun()
+                                    
+                                    # Download button for full transcript
+                                    st.download_button(
+                                        "⬇️ Download Full Transcript",
+                                        transcript,
+                                        file_name=f"transcript_{space_id[:8]}.txt",
+                                        mime="text/plain"
+                                    )
                 
-                with content_tab2:
-                    st.subheader("Audio")
-                    if os.path.exists(storage_paths['audio_path']):
-                        audio_size = os.path.getsize(storage_paths['audio_path']) / (1024 * 1024)  # MB
-                        st.write(f"Audio file size: {audio_size:.1f} MB")
-                        
-                        with open(storage_paths['audio_path'], 'rb') as audio_file:
-                            audio_data = audio_file.read()
-                            st.download_button(
-                                "⬇️ Download Full Recording",
-                                audio_data,
-                                file_name=f"space_{space_id[:8]}.mp3",
-                                mime="audio/mpeg"
-                            )
-                
-                with content_tab3:
-                    st.subheader("Transcript")
-                    if os.path.exists(storage_paths['transcript_path']):
-                        with open(storage_paths['transcript_path'], 'r') as f:
-                            transcript = f.read()
-                        
-                        # Split transcript into chunks
-                        chunks = chunk_transcript(transcript)
-                        total_chunks = len(chunks)
-                        
-                        # Add chunk navigation
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            st.write(f"Transcript length: {len(transcript):,} characters ({total_chunks} pages)")
-                        with col2:
-                            chunk_idx = st.number_input("Page", min_value=1, max_value=total_chunks, value=1) - 1
-                        
-                        # Show current chunk with some context
-                        st.text_area(
-                            f"Transcript (Page {chunk_idx + 1}/{total_chunks})", 
-                            chunks[chunk_idx],
-                            height=400
-                        )
-                        
-                        # Navigation buttons
-                        col1, col2, col3 = st.columns([1, 2, 1])
-                        with col1:
-                            if chunk_idx > 0:
-                                if st.button("⬅️ Previous Page"):
-                                    st.session_state.chunk_idx = max(0, chunk_idx - 1)
-                                    st.rerun()
-                        with col3:
-                            if chunk_idx < total_chunks - 1:
-                                if st.button("Next Page ➡️"):
-                                    st.session_state.chunk_idx = min(total_chunks - 1, chunk_idx + 1)
-                                    st.rerun()
-                        
-                        # Download button for full transcript
-                        st.download_button(
-                            "⬇️ Download Full Transcript",
-                            transcript,
-                            file_name=f"transcript_{space_id[:8]}.txt",
-                            mime="text/plain"
-                        )
+                except Exception as e:
+                    st.error(f"Error displaying process: {str(e)}")
+                    status.update(label="Error!", state="error")
 
     with summary_tab:
         st.subheader("📝 Content Summary")
@@ -1229,6 +1372,14 @@ if check_password():
         st.write(f"Total audio storage: {total_audio:.1f} MB")
         if total_audio > 1000:  # 1 GB warning
             st.warning("⚠️ Storage is getting full. Consider cleaning old files.") 
+
+    # Check and restore state for current process if browser was closed
+    if st.session_state.current_space_id:
+        current_state = get_process_state(str(STORAGE_DIR), st.session_state.current_space_id)
+        if current_state['status'] == 'complete':
+            st.session_state.processing_complete = True
+        elif current_state['status'] == 'processing':
+            st.session_state.processing_complete = False
 
 else:
     st.stop()  # Do not continue if check_password is not True.
