@@ -14,7 +14,6 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 from core.download import download_twitter_space
-from celery_worker.tasks import transcribe_task, generate_quotes_task, generate_summary_task
 from core.quotes import create_quote_thread, chunk_transcript
 from core.summary import generate_summary
 from utils.file_utils import clean_filename

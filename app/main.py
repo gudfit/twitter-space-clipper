@@ -14,6 +14,8 @@ import time
 import logging
 from streamlit_extras.stylable_container import stylable_container  # type: ignore
 from datetime import datetime, timedelta
+from celery.result import AsyncResult
+from celery_worker.tasks import app as celery_app
 
 from core.types import ProcessState, StoragePaths
 
@@ -160,6 +162,10 @@ if check_password():
         st.session_state.loaded_space_id = None
     if 'active_processes' not in st.session_state:
         st.session_state.active_processes = []
+    if 'current_task_id' not in st.session_state:
+        st.session_state.current_task_id = None
+    if 'last_check_time' not in st.session_state:
+        st.session_state.last_check_time = None
 
     logger.info("Creating storage directories...")
     # Create persistent storage directories
@@ -285,24 +291,70 @@ if check_password():
         """Check the current state of processing for a space."""
         state = get_process_state(str(STORAGE_DIR), space_id)
         
-        # Check if process is running but stale
-        if state['status'] == 'processing':
-            last_updated_str = state.get('last_updated')
-            if last_updated_str:
-                last_updated = datetime.fromisoformat(last_updated_str)
-                time_since_update = datetime.now() - last_updated
-                logger.debug(f"Process state last updated: {time_since_update} ago")
-                
-                # Only mark as error if significantly stale (> 1 hour)
-                if time_since_update > timedelta(hours=1):
-                    logger.warning(f"Process {space_id} appears stale (no updates for {time_since_update})")
-                    state.update({
-                        'status': 'error',
-                        'error': 'Process timed out - no updates for over an hour'
-                    })
-                    save_process_state(str(STORAGE_DIR), space_id, state)
-                else:
-                    logger.info(f"Process {space_id} is still active (last update: {time_since_update} ago)")
+        # Only check for stale process if enough time has passed since last check
+        current_time = time.time()
+        if (st.session_state.last_check_time is None or 
+            current_time - st.session_state.last_check_time >= 5):  # Check every 5 seconds
+            
+            st.session_state.last_check_time = current_time
+            
+            # Check Celery task status if we have a task ID
+            if 'task_id' in state:
+                try:
+                    result = AsyncResult(state['task_id'], app=celery_app)
+                    if result.ready():
+                        if result.successful():
+                            # Task completed successfully
+                            if state['status'] != 'complete':
+                                state.update({
+                                    'status': 'complete',
+                                    'stage': None,
+                                    'progress': 1.0,
+                                    'last_updated': datetime.now().isoformat()
+                                })
+                                save_process_state(str(STORAGE_DIR), space_id, state)
+                        else:
+                            # Task failed
+                            error = str(result.get(propagate=False))
+                            state.update({
+                                'status': 'error',
+                                'error': error,
+                                'stage': None,
+                                'progress': 0.0,
+                                'last_updated': datetime.now().isoformat()
+                            })
+                            save_process_state(str(STORAGE_DIR), space_id, state)
+                    else:
+                        # Task is still running, get current task in chain
+                        current_task = result.parent if result.parent else result
+                        if current_task and current_task.state != 'PENDING':
+                            # Update last_updated timestamp to prevent timeout
+                            state['last_updated'] = datetime.now().isoformat()
+                            save_process_state(str(STORAGE_DIR), space_id, state)
+                except Exception as e:
+                    logger.error(f"Error checking task status: {e}")
+            
+            # Check if process is running but stale
+            if state['status'] == 'processing':
+                last_updated_str = state.get('last_updated')
+                if last_updated_str:
+                    last_updated = datetime.fromisoformat(last_updated_str)
+                    time_since_update = datetime.now() - last_updated
+                    logger.debug(f"Process state last updated: {time_since_update} ago")
+                    
+                    # Only mark as error if significantly stale (> 1 hour)
+                    if time_since_update > timedelta(hours=1):
+                        logger.warning(f"Process {space_id} appears stale (no updates for {time_since_update})")
+                        state.update({
+                            'status': 'error',
+                            'error': 'Process timed out - no updates for over an hour',
+                            'stage': None,
+                            'progress': 0.0,
+                            'last_updated': datetime.now().isoformat()
+                        })
+                        save_process_state(str(STORAGE_DIR), space_id, state)
+                    else:
+                        logger.debug(f"Process {space_id} is still active (last update: {time_since_update} ago)")
         
         return state
 
@@ -624,35 +676,133 @@ if check_password():
                         save_process_state(str(STORAGE_DIR), space_id, state)
                         st.rerun()
 
+    def sync_active_processes():
+        """Synchronize active processes in session state with actual process states."""
+        if not hasattr(st.session_state, 'active_processes'):
+            st.session_state.active_processes = []
+        
+        # Create new list of actually active processes
+        active_processes = []
+        state_dir = STORAGE_DIR / "state"
+        
+        if state_dir.exists():
+            for state_file in state_dir.glob("*.json"):
+                try:
+                    space_id = state_file.stem
+                    state = get_process_state(str(STORAGE_DIR), space_id)
+                    original_url = get_url_from_history(space_id)
+                    
+                    # Check if process is actually active
+                    if state['status'] == 'processing':
+                        # Check Celery task status if we have a task ID
+                        task_active = False
+                        if 'task_id' in state:
+                            try:
+                                result = AsyncResult(state['task_id'], app=celery_app)
+                                if not result.ready():
+                                    # Get current task in chain
+                                    current_task = result.parent if result.parent else result
+                                    if current_task and current_task.state != 'PENDING':
+                                        task_active = True
+                                        # Update state with current task info
+                                        state['stage'] = current_task.name.split('.')[-1].replace('_task', '')
+                                        save_process_state(str(STORAGE_DIR), space_id, state)
+                            except Exception as e:
+                                logger.error(f"Error checking task status: {e}")
+                        
+                        # Check last update time
+                        last_updated_str = state.get('last_updated')
+                        if last_updated_str:
+                            last_updated = datetime.fromisoformat(last_updated_str)
+                            time_since_update = datetime.now() - last_updated
+                            
+                            # Only consider active if task is running or recently updated
+                            if task_active or time_since_update <= timedelta(minutes=5):
+                                active_processes.append((space_id, state, original_url))
+                            else:
+                                # Mark stale process as error
+                                logger.warning(f"Found stale process {space_id}, marking as error")
+                                state.update({
+                                    'status': 'error',
+                                    'error': 'Process state was stale or task was terminated',
+                                    'stage': None,
+                                    'progress': 0.0,
+                                    'last_updated': datetime.now().isoformat()
+                                })
+                                save_process_state(str(STORAGE_DIR), space_id, state)
+                
+                except Exception as e:
+                    logger.error(f"Error checking state file {state_file}: {e}")
+                    continue
+        
+        # Update session state with actually active processes
+        st.session_state.active_processes = active_processes
+
     def process_space_with_ui(url: str, _progress_container: Any) -> Optional[StoragePaths]:
         """Process media URL with Streamlit UI updates."""
         try:
             log_processing_step("Space processing", "started", f"URL: {url}")
             space_id = get_space_id(url)
             
-            # Check if already being processed
-            state = check_process_state(space_id)
-            if state['status'] == 'processing':
-                display_process_state(state, _progress_container)
-                st.info("⏳ This URL is already being processed. You can view its progress in the sidebar.")
-                
-                # Create progress callback and resume processing
-                progress_callback = StreamlitProgressCallback(_progress_container)
-                result_paths = process_space(url, str(STORAGE_DIR), progress_callback)
-                
-                if result_paths:
-                    st.session_state.processing_complete = True
-                    return result_paths
-                return None
+            # Sync active processes first
+            sync_active_processes()
             
-            # Check if all files already exist
+            # Get storage paths
             storage_paths = get_storage_paths(str(STORAGE_DIR), space_id)
+            
+            # Check if all files already exist and are valid
             if all(os.path.exists(str(p)) for p in storage_paths.values()):
                 st.success("✅ All files already exist for this URL!")
                 st.session_state.processing_complete = True
                 return storage_paths
             
-            # Check for partial completion and resume
+            # Check current state
+            state = check_process_state(space_id)
+            is_active_process = any(space_id == p[0] for p in st.session_state.active_processes)
+            
+            # Handle different states
+            if state['status'] == 'processing':
+                if is_active_process:
+                    # Process is actually active and in sidebar
+                    display_process_state(state, _progress_container)
+                    st.info("⏳ This URL is already being processed. You can view its progress in the sidebar.")
+                    return None
+                else:
+                    # Process claims to be active but isn't in sidebar - validate state
+                    task_active = False
+                    if 'task_id' in state:
+                        try:
+                            result = AsyncResult(state['task_id'], app=celery_app)
+                            if not result.ready():
+                                # Get current task in chain
+                                current_task = result.parent if result.parent else result
+                                if current_task and current_task.state != 'PENDING':
+                                    task_active = True
+                                    # Update state with current task info
+                                    state['stage'] = current_task.name.split('.')[-1].replace('_task', '')
+                                    save_process_state(str(STORAGE_DIR), space_id, state)
+                        except Exception as e:
+                            logger.error(f"Error checking task status: {e}")
+                    
+                    if task_active:
+                        # Task is still running, add to active processes
+                        st.session_state.active_processes.append((space_id, state, url))
+                        display_process_state(state, _progress_container)
+                        st.info("⏳ This URL is already being processed. You can view its progress in the sidebar.")
+                        st.rerun()
+                    else:
+                        # Task is not active, reset state
+                        logger.warning(f"Process {space_id} has no active task, resetting...")
+                        state.update({
+                            'status': 'error',
+                            'error': 'Process was interrupted',
+                            'stage': None,
+                            'progress': 0.0,
+                            'last_updated': datetime.now().isoformat()
+                        })
+                        save_process_state(str(STORAGE_DIR), space_id, state)
+            
+            # Check for partial completion and cleanup failed files
             files_exist = {
                 'audio': os.path.exists(storage_paths['audio_path']),
                 'transcript': os.path.exists(storage_paths['transcript_path']),
@@ -660,36 +810,64 @@ if check_password():
                 'summary': os.path.exists(storage_paths['summary_path'])
             }
             
-            # Reset state to resume processing
+            # If previous attempt failed, clean up partial files
+            if state['status'] == 'error':
+                logger.info(f"Cleaning up failed process state for {space_id}")
+                # Clean up partial downloads or corrupted files
+                if files_exist['audio'] and state.get('stage') == 'download':
+                    logger.info("Removing partial audio file")
+                    try:
+                        os.remove(storage_paths['audio_path'])
+                        files_exist['audio'] = False
+                    except Exception as e:
+                        logger.error(f"Error removing audio file: {e}")
+                
+                # Remove other incomplete files based on stage
+                if state.get('stage') in ['transcribe', 'quotes', 'summary']:
+                    for file_type, exists in files_exist.items():
+                        if exists and file_type != 'audio':  # Keep audio if it was fully downloaded
+                            try:
+                                os.remove(storage_paths[f'{file_type}_path'])
+                                files_exist[file_type] = False
+                            except Exception as e:
+                                logger.error(f"Error removing {file_type} file: {e}")
+            
+            # Reset state to start/resume processing
             state.update({
                 'status': 'processing',
-                'stage': None,  # Let process_space determine the next stage
+                'stage': None,
                 'error': None,
                 'progress': 0.0,
-                'files': files_exist
+                'files': files_exist,
+                'last_updated': datetime.now().isoformat()
             })
             save_process_state(str(STORAGE_DIR), space_id, state)
             
-            # Create progress callback
-            progress_callback = StreamlitProgressCallback(_progress_container)
+            # Start Celery task chain
+            from celery_worker.tasks import process_space_chain
+            chain = process_space_chain(url, str(STORAGE_DIR))
+            result = chain.apply_async()
             
-            # Process the space
-            result_paths = process_space(url, str(STORAGE_DIR), progress_callback)
+            # Store task ID in session state and process state
+            st.session_state.current_task_id = result.id
+            st.session_state.current_space_id = space_id
+            state['task_id'] = result.id
+            save_process_state(str(STORAGE_DIR), space_id, state)
             
-            if result_paths:
-                st.session_state.processing_complete = True
-                return result_paths
-            else:
-                # Check final state for error message
-                state = check_process_state(space_id)
-                if state['error']:
-                    st.error(f"Processing failed: {state['error']}")
-                else:
-                    st.error("Processing failed. Check the logs for details.")
-                return None
+            # Add to active processes and ensure it's shown in sidebar
+            if space_id not in [p[0] for p in st.session_state.active_processes]:
+                st.session_state.active_processes.append((space_id, state, url))
+                st.rerun()  # Rerun to update sidebar immediately
+            
+            # Return paths for UI updates
+            return storage_paths
             
         except Exception as e:
+            logger.error(f"Error starting process: {str(e)}")
             st.error(f"Error: {str(e)}")
+            # Clean up session state
+            if 'current_task_id' in st.session_state:
+                st.session_state.current_task_id = None
             return None
 
     def download_with_progress(url: str, output_dir: str, progress_bar: Any) -> Optional[str]:
@@ -798,6 +976,24 @@ if check_password():
                     
                     # Check if process needs to be resumed
                     if state['status'] == 'processing':
+                        # Validate last update time
+                        last_updated_str = state.get('last_updated')
+                        if last_updated_str:
+                            last_updated = datetime.fromisoformat(last_updated_str)
+                            time_since_update = datetime.now() - last_updated
+                            
+                            # If no updates in last 5 minutes, consider it stale
+                            if time_since_update > timedelta(minutes=5):
+                                logger.warning(f"Found stale process {space_id}, marking as error")
+                                state.update({
+                                    'status': 'error',
+                                    'error': 'Process state was stale',
+                                    'stage': None,
+                                    'progress': 0.0
+                                })
+                                save_process_state(str(STORAGE_DIR), space_id, state)
+                                continue
+                        
                         # Check if files exist but are incomplete
                         storage_paths = get_storage_paths(str(STORAGE_DIR), space_id)
                         files_exist = {
@@ -817,20 +1013,19 @@ if check_password():
                                 st.session_state.active_processes.append((space_id, state, original_url))
                         else:
                             # Check if recently updated
-                            last_updated_str = state.get('last_updated')
                             if last_updated_str:
                                 last_updated = datetime.fromisoformat(last_updated_str)
                                 time_since_update = datetime.now() - last_updated
                                 
-                                # Consider active if updated in last hour
-                                if time_since_update <= timedelta(hours=1):
+                                # Consider active if updated in last 5 minutes
+                                if time_since_update <= timedelta(minutes=5):
                                     logger.info(f"Found active process {space_id}")
                                     processing_spaces.append((space_id, state, original_url))
                                     
                                     # Update session state
                                     if space_id not in [p[0] for p in st.session_state.active_processes]:
                                         st.session_state.active_processes.append((space_id, state, original_url))
-                    
+                
                 except Exception as e:
                     logger.error(f"Error checking state file {state_file}: {e}")
                     continue
@@ -851,6 +1046,32 @@ if check_password():
             return storage_paths
         return None
 
+    def check_celery_task_status(task_id: str) -> Dict[str, Any]:
+        """Check status of a Celery task chain."""
+        result = AsyncResult(task_id, app=celery_app)
+        
+        if result.ready():
+            if result.successful():
+                return {
+                    'status': 'complete',
+                    'result': result.get()
+                }
+            else:
+                # If the chain failed, get the error
+                error = str(result.get(propagate=False))
+                return {
+                    'status': 'error',
+                    'error': error
+                }
+        else:
+            # Get current task in chain
+            current_task = result.parent if result.parent else result
+            return {
+                'status': 'processing',
+                'state': current_task.state,
+                'task_id': current_task.id
+            }
+
     # Main app
     logger.info("Starting main application UI...")
     st.title("🎙️ LinkToQuote")
@@ -859,6 +1080,9 @@ if check_password():
     # Create sidebar
     with st.sidebar:
         st.markdown("### 🔄 Active Processes")
+        
+        # Sync active processes
+        sync_active_processes()
         
         # Update sidebar with active processes
         if st.session_state.active_processes:
@@ -882,17 +1106,10 @@ if check_password():
                     
                     # Add view details button
                     if st.button("📂 View Details", key=f"view_{space_id}_sidebar"):
-                        # Update session state
                         st.session_state.current_space_id = space_id
                         st.session_state.processing_complete = current_state['status'] == 'complete'
-                        # Load the URL from history
                         st.session_state.url_history = load_url_history()
-                        # Set the space URL for display
-                        space_url = st.session_state.url_history.get(space_id, '')
-                        if space_url:
-                            st.session_state.selected_option = "New URL"  # Reset dropdown
-                            # Force main area update
-                            st.rerun()
+                        st.rerun()
                     
                     # Show last update time
                     last_updated_str = current_state.get('last_updated')
@@ -1005,7 +1222,7 @@ if check_password():
 
             # Show the URL as a copyable field if available
             if space_url and space_url != "Unknown URL":
-                st.markdown("### Currently Processing")
+                st.markdown("### Currently Viewing/Processing")
                 st.text_input("", value=space_url, disabled=True, label_visibility="collapsed")
                 st.markdown("---")
 
@@ -1441,6 +1658,53 @@ if check_password():
             st.session_state.processing_complete = True
         elif current_state['status'] == 'processing':
             st.session_state.processing_complete = False
+
+    # In the main tab, after starting the Celery chain:
+    if st.session_state.current_task_id:
+        # Check task status
+        task_status = check_celery_task_status(st.session_state.current_task_id)
+        
+        if task_status['status'] == 'processing':
+            # Show progress
+            with st.status("Processing media...", expanded=True) as status:
+                # Display current state from process state file
+                state = check_process_state(st.session_state.current_space_id)
+                display_process_state(state, st.container())
+                
+                # Only rerun if enough time has passed
+                if (st.session_state.last_check_time is None or 
+                    time.time() - st.session_state.last_check_time >= 5):  # Check every 5 seconds
+                    time.sleep(1)  # Small delay to prevent UI flicker
+                    st.rerun()
+        
+        elif task_status['status'] == 'complete':
+            st.success("✅ Processing complete!")
+            st.session_state.processing_complete = True
+            # Clear task ID since it's done
+            st.session_state.current_task_id = None
+            st.rerun()
+        
+        elif task_status['status'] == 'error':
+            st.error(f"❌ Processing failed: {task_status.get('error', 'Unknown error')}")
+            # Clear task ID on error
+            st.session_state.current_task_id = None
+
+    # Clean up stale processes from session state
+    if st.session_state.active_processes:
+        active_processes = []
+        for space_id, state, url in st.session_state.active_processes:
+            current_state = check_process_state(space_id)
+            if current_state['status'] == 'processing':
+                # Validate last update time
+                last_updated_str = current_state.get('last_updated')
+                if last_updated_str:
+                    last_updated = datetime.fromisoformat(last_updated_str)
+                    time_since_update = datetime.now() - last_updated
+                    if time_since_update <= timedelta(minutes=5):
+                        active_processes.append((space_id, current_state, url))
+                    else:
+                        logger.warning(f"Removing stale process {space_id} from active processes")
+        st.session_state.active_processes = active_processes
 
 else:
     st.stop()  # Do not continue if check_password is not True.
