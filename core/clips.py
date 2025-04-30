@@ -6,9 +6,9 @@ import argparse
 from pathlib import Path
 import subprocess
 import json
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 
-def parse_timestamp_line(line: str) -> Tuple[float, float, str]:
+def parse_timestamp_line(line: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
     """Parse a timestamp line from the transcript"""
     try:
         # Format: [00:00.000 -> 00:30.000] Text here
@@ -129,7 +129,7 @@ def process_quotes_file(quotes_file: str, audio_file: str, output_dir: str):
         else:
             print(f"❌ Failed to create clip {i}")
 
-def find_audio_file(base_dir: str) -> str:
+def find_audio_file(base_dir: str) -> Optional[str]:
     """Find the audio file in the given directory"""
     audio_extensions = ['.m4a', '.mp3', '.wav']
     for ext in audio_extensions:

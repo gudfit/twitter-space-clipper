@@ -24,8 +24,10 @@ class ProgressCallback(Protocol):
 
 class ProcessLock:
     """Context manager for process locking using file locks."""
-    def __init__(self, lock_path: str, timeout: int = 3600, retry_delay: float = 1.0, max_retries: int = 3):
-        self.lock_path = lock_path
+    def __init__(self, storage_root: str, space_id: str, timeout: int = 3600, retry_delay: float = 1.0, max_retries: int = 3):
+        self.lock_dir = Path(storage_root) / "locks"
+        self.lock_dir.mkdir(parents=True, exist_ok=True)
+        self.lock_path = self.lock_dir / f"{space_id}.lock"
         self.lock_file = None
         self.timeout = timeout
         self.retry_delay = retry_delay
@@ -206,6 +208,8 @@ def process_space(
         Dictionary of paths to generated files if successful, None otherwise
     """
     try:
+        logger.info(f"Space processing started: URL: {url}")
+        
         # Extract space ID from URL
         space_id = get_space_id(url)
         if not space_id:
@@ -237,7 +241,8 @@ def process_space(
                 logger.info("Starting download")
                 update_progress("download", 0.0, "Starting download...")
                 
-                success = download_twitter_space(url, paths['audio_path'], download_callback)
+                audio_dir = os.path.dirname(paths['audio_path'])
+                success = download_twitter_space(url, audio_dir)
                 if not success:
                     logger.error("Failed to download audio")
                     raise Exception("Failed to download audio")
@@ -371,8 +376,10 @@ def regenerate_quotes(transcript_path: str, quotes_path: str, url: str) -> List[
             else:
                 f.write(quotes)
         
-        logger.info(f"Successfully regenerated {len(quotes) if isinstance(quotes, list) else 1} quotes")
-        return quotes if isinstance(quotes, list) else quotes.split('\n\n')
+        # Return quotes as list
+        if isinstance(quotes, list):
+            return quotes
+        return [q.strip() for q in quotes.split('\n\n') if q.strip()]
         
     except Exception as e:
         logger.exception("Error regenerating quotes")

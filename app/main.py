@@ -7,12 +7,12 @@ import subprocess
 import json
 import hashlib
 import shutil
-import yt_dlp
+import yt_dlp  # type: ignore
 import re
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable, TextIO, BinaryIO, Protocol, Union, cast
 import time
 import logging
-from streamlit_extras.stylable_container import stylable_container
+from streamlit_extras.stylable_container import stylable_container  # type: ignore
 from datetime import datetime, timedelta
 
 # Configure logging first
@@ -38,14 +38,17 @@ logger.info("Starting application initialization...")
 
 # Disable watchdog for PyTorch modules to prevent custom class errors
 import streamlit.watcher.path_watcher
+
 original_watch_file = streamlit.watcher.path_watcher.watch_file
 
-def patched_watch_file(filepath, *args, **kwargs):
+def patched_watch_file(filepath: str, *args: Any, **kwargs: Any) -> Optional[bool]:
+    """Patched watch_file function that ignores PyTorch files."""
     if 'torch' in filepath or '_C' in filepath:
         return None
-    return original_watch_file(filepath, *args, **kwargs)
+    return cast(bool, original_watch_file(filepath, *args, **kwargs))
 
-streamlit.watcher.path_watcher.watch_file = patched_watch_file
+# Type ignore because streamlit's type stubs don't match implementation
+streamlit.watcher.path_watcher.watch_file = patched_watch_file  # type: ignore
 
 def check_ffmpeg():
     """Check if ffmpeg is installed and accessible."""
@@ -174,7 +177,7 @@ if check_password():
         with open(URL_HISTORY_FILE, 'w') as f:
             json.dump({}, f)
 
-    def log_processing_step(step: str, status: str = "started", details: str = None):
+    def log_processing_step(step: str, status: str = "started", details: Optional[str] = None) -> None:
         """Helper function to log processing steps consistently"""
         message = f"{step} {status}"
         if details:
@@ -239,13 +242,17 @@ if check_password():
                 ):
                     st.code(quote, language="text")
 
+    class ProgressCallbackImpl(Protocol):
+        """Protocol for progress tracking callbacks."""
+        def __call__(self, stage: str, progress: float, status: str) -> None: ...
+
     class StreamlitProgressCallback:
         """Progress callback that updates Streamlit UI."""
-        def __init__(self, container):
+        def __init__(self, container: Any):
             self.container = container
             self.progress_bar = None
             
-        def __call__(self, stage: str, progress: float, status: str):
+        def __call__(self, stage: str, progress: float, status: str) -> None:
             if not self.progress_bar:
                 self.progress_bar = self.container.progress(0)
             
@@ -261,7 +268,8 @@ if check_password():
             
             emoji = stage_emoji.get(stage, "")
             # Update progress bar with emoji
-            self.progress_bar.progress(progress, f"{emoji} {stage.title()}: {status}")
+            if self.progress_bar is not None:
+                self.progress_bar.progress(progress, f"{emoji} {stage.title()}: {status}")
             
             # Only show completion/error messages outside progress bar
             if stage == "complete":
@@ -308,7 +316,7 @@ if check_password():
             with container:
                 st.success("✅ Processing complete!")
 
-    def process_space_with_ui(url: str, _progress_container) -> dict:
+    def process_space_with_ui(url: str, _progress_container: Any) -> Optional[Dict[str, str]]:
         """Process media URL with Streamlit UI updates."""
         try:
             log_processing_step("Space processing", "started", f"URL: {url}")
@@ -322,21 +330,21 @@ if check_password():
                 return None
             
             # Check if all files already exist
-            paths = get_storage_paths(space_id)
-            if all(os.path.exists(p) for p in paths.values()):
+            storage_paths = get_storage_paths(space_id)
+            if all(os.path.exists(p) for p in storage_paths.values()):
                 st.success("✅ All files already exist for this URL!")
                 st.session_state.processing_complete = True
-                return paths
+                return storage_paths
             
             # Create progress callback
             progress_callback = StreamlitProgressCallback(_progress_container)
             
             # Process the space
-            paths = process_space(url, str(STORAGE_DIR), progress_callback)
+            result_paths: Optional[Dict[str, str]] = process_space(url, str(STORAGE_DIR), progress_callback)
             
-            if paths:
+            if result_paths:
                 st.session_state.processing_complete = True
-                return paths
+                return result_paths
             else:
                 # Check final state for error message
                 state = check_process_state(space_id)
@@ -350,16 +358,16 @@ if check_password():
             st.error(f"Error: {str(e)}")
             return None
 
-    def download_with_progress(url: str, output_dir: str, progress_bar) -> Optional[str]:
+    def download_with_progress(url: str, output_dir: str, progress_bar: Any) -> Optional[str]:
         """Download media with progress tracking."""
+        space_id = get_space_id(url)
         # Create a lock file path
-        lock_file = os.path.join(output_dir, f"{get_space_id(url)}.lock")
+        lock_file = os.path.join(output_dir, f"{space_id}.lock")
         
         try:
             # Try to acquire a lock for this download
-            with ProcessLock(lock_file, timeout=3600):
+            with ProcessLock(str(STORAGE_DIR), space_id, timeout=3600):
                 # First check if MP3 already exists
-                space_id = get_space_id(url)
                 final_mp3 = os.path.join(output_dir, f"{space_id}.mp3")
                 if os.path.exists(final_mp3):
                     logger.info(f"MP3 file already exists: {final_mp3}")
@@ -370,48 +378,37 @@ if check_password():
                 download_opts = {
                     'format': 'bestaudio/best',
                     'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
-                    'progress_hooks': [ProgressCallback(progress_bar)],
+                    'progress_hooks': [lambda d: progress_bar.progress(d['downloaded_bytes'] / d['total_bytes'] if d['total_bytes'] else 0)],
                     'keepvideo': True,  # Keep the original file
                     'postprocessors': [],  # No post-processing yet
                 }
                 
                 try:
-                    # First, just download the file
-                    progress_bar.progress(0.0, "Starting download...")
                     with yt_dlp.YoutubeDL(download_opts) as ydl:
                         info = ydl.extract_info(url, download=True)
                         original_file = os.path.join(output_dir, f"{info['id']}.{info['ext']}")
                         
-                        if not os.path.exists(original_file):
-                            raise FileNotFoundError("Download failed - file not found")
-                        
-                        progress_bar.progress(0.5, "Download complete, converting to MP3...")
-                        logger.info(f"Raw file downloaded to: {original_file}")
-                        
-                        # Now try to convert to MP3 if ffmpeg is available
-                        if check_ffmpeg():
-                            try:
-                                # Convert to MP3 using ffmpeg
-                                subprocess.run([
-                                    'ffmpeg', '-y', '-i', original_file,
-                                    '-vn', '-acodec', 'libmp3lame',
-                                    final_mp3
-                                ], check=True, capture_output=True)
+                        # Convert to MP3 if needed
+                        if info['ext'] != 'mp3':
+                            if check_ffmpeg():
+                                logger.info("Converting to MP3...")
+                                progress_bar.progress(0.9, "Converting to MP3...")
                                 
-                                # Cleanup original file after successful conversion
+                                # Run ffmpeg conversion
+                                os.system(f'ffmpeg -i "{original_file}" -vn -ar 44100 -ac 2 -b:a 192k "{final_mp3}"')
+                                
+                                # Clean up original file
                                 os.remove(original_file)
-                                progress_bar.progress(1.0, "Conversion complete!")
-                                logger.info(f"Successfully converted to MP3: {final_mp3}")
-                                return final_mp3
                                 
-                            except subprocess.SubprocessError as e:
-                                logger.error(f"MP3 conversion failed: {str(e)}")
-                                progress_bar.progress(1.0, "MP3 conversion failed")
+                                progress_bar.progress(1.0, "Download complete")
+                                return final_mp3
+                            else:
+                                logger.warning("ffmpeg not found - keeping original format")
+                                progress_bar.progress(1.0, "Download complete (original format)")
                                 return original_file
-                        else:
-                            logger.warning("ffmpeg not found - keeping original format")
-                            progress_bar.progress(1.0, "Download complete (original format)")
-                            return original_file
+                        
+                        # If already MP3, just return the original file
+                        return original_file
                         
                 except Exception as e:
                     logger.error(f"Download error: {str(e)}")
@@ -432,7 +429,7 @@ if check_password():
         space_id = url.strip('/').split('/')[-1]
         return hashlib.md5(space_id.encode()).hexdigest()
 
-    def get_storage_paths(space_id: str) -> dict:
+    def get_storage_paths(space_id: str) -> Dict[str, str]:
         """Get paths for storing space data."""
         return {
             'audio_path': str(DOWNLOADS_DIR / f"{space_id}.mp3"),
@@ -462,14 +459,15 @@ if check_password():
                     space_id = state_file.stem
                     state = get_process_state(str(STORAGE_DIR), space_id)
                     
-                    # Check if process is running and not stale
-                    if state['status'] == 'processing':
+                    # Check if process is running or recently updated
+                    if state['status'] in ['processing', 'error']:
                         last_updated = datetime.fromisoformat(state['last_updated']) if state.get('last_updated') else None
                         if last_updated:
                             time_since_update = datetime.now() - last_updated
                             logger.debug(f"Time since last update: {time_since_update}")
                             
-                            if time_since_update <= timedelta(hours=1):
+                            # Consider process active if updated in last hour or has error status
+                            if time_since_update <= timedelta(hours=1) or state['status'] == 'error':
                                 # Get original URL if available
                                 original_url = get_url_from_history(space_id)
                                 logger.debug(f"Adding active process: {space_id} - {original_url}")
@@ -488,19 +486,12 @@ if check_password():
             return []
 
     def load_previous_media(space_id: str) -> Optional[Dict[str, str]]:
-        """Load previously processed media files.
-        
-        Args:
-            space_id: ID of the space to load
-            
-        Returns:
-            Dictionary of file paths if successful, None otherwise
-        """
-        paths = get_storage_paths(space_id)
-        if all(os.path.exists(p) for p in paths.values()):
+        """Load previously processed media files."""
+        storage_paths = get_storage_paths(space_id)
+        if all(os.path.exists(p) for p in storage_paths.values()):
             st.session_state.loaded_space_id = space_id
             st.session_state.processing_complete = True
-            return paths
+            return storage_paths
         return None
 
     # Main app
@@ -601,18 +592,18 @@ if check_password():
                                 st.success("✅ Space processed successfully!")
                                 
                                 # Check if we need to generate summary
-                                paths = get_storage_paths(st.session_state.current_space_id)
-                                if not os.path.exists(paths['summary_path']):
-                                    if os.path.exists(paths['transcript_path']) and os.path.exists(paths['quotes_path']):
+                                storage_paths = get_storage_paths(st.session_state.current_space_id)
+                                if not os.path.exists(storage_paths['summary_path']):
+                                    if os.path.exists(storage_paths['transcript_path']) and os.path.exists(storage_paths['quotes_path']):
                                         with st.spinner("Generating summary..."):
-                                            with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                                            with open(storage_paths['transcript_path'], 'r', encoding='utf-8') as f:
                                                 transcript = f.read()
-                                            quotes = read_quotes(paths['quotes_path'])
+                                            quotes = read_quotes(storage_paths['quotes_path'])
                                             
-                                            summary = generate_summary(transcript, quotes)
+                                            summary = generate_summary(transcript, quotes, storage_paths['summary_path'])
                                             
                                             if summary['overview'] != "Error generating summary":
-                                                save_summary(summary, paths['summary_path'])
+                                                save_summary(summary, storage_paths['summary_path'])
                                                 st.success("✨ Summary generated successfully!")
                                             else:
                                                 st.error("Failed to generate summary. Please try manually.")
@@ -623,7 +614,7 @@ if check_password():
 
             # If processing is complete or media was loaded, show results
             if st.session_state.processing_complete:
-                process_result = get_storage_paths(space_id)
+                storage_paths = get_storage_paths(space_id)
                 
                 # Show original URL for loaded content
                 if st.session_state.loaded_space_id:
@@ -635,7 +626,7 @@ if check_password():
                 
                 with content_tab1:
                     st.subheader("Generated Quotes")
-                    if os.path.exists(process_result['quotes_path']):
+                    if os.path.exists(storage_paths['quotes_path']):
                         # Add regenerate button at the top
                         col1, col2 = st.columns([4, 1])
                         with col2:
@@ -668,8 +659,8 @@ if check_password():
                                             
                                             try:
                                                 quotes = regenerate_quotes(
-                                                    process_result['transcript_path'],
-                                                    process_result['quotes_path'],
+                                                    storage_paths['transcript_path'],
+                                                    storage_paths['quotes_path'],
                                                     space_url
                                                 )
                                                 
@@ -704,7 +695,7 @@ if check_password():
                                 st.rerun()
                         
                         # Read and display quotes in the main container
-                        quotes = read_quotes(process_result['quotes_path'])
+                        quotes = read_quotes(storage_paths['quotes_path'])
                         if quotes:  # Only try to display if we have quotes
                             display_quotes(quotes, st.container())
                         else:
@@ -712,22 +703,22 @@ if check_password():
                 
                 with content_tab2:
                     st.subheader("Audio")
-                    if os.path.exists(process_result['audio_path']):
-                        audio_size = os.path.getsize(process_result['audio_path']) / (1024 * 1024)  # MB
+                    if os.path.exists(storage_paths['audio_path']):
+                        audio_size = os.path.getsize(storage_paths['audio_path']) / (1024 * 1024)  # MB
                         st.write(f"Audio file size: {audio_size:.1f} MB")
                         
-                        with open(process_result['audio_path'], 'rb') as f:
+                        with open(storage_paths['audio_path'], 'rb') as audio_file:
                             st.download_button(
                                 "⬇️ Download Full Recording",
-                                f,
+                                audio_file,
                                 file_name=f"space_{space_id[:8]}.mp3",
                                 mime="audio/mpeg"
                             )
                 
                 with content_tab3:
                     st.subheader("Transcript")
-                    if os.path.exists(process_result['transcript_path']):
-                        with open(process_result['transcript_path'], 'r') as f:
+                    if os.path.exists(storage_paths['transcript_path']):
+                        with open(storage_paths['transcript_path'], 'r') as f:
                             transcript = f.read()
                         
                         # Split transcript into chunks
@@ -773,13 +764,13 @@ if check_password():
         st.subheader("📝 Content Summary")
         
         if st.session_state.processing_complete and st.session_state.current_space_id:
-            paths = get_storage_paths(st.session_state.current_space_id)
+            storage_paths = get_storage_paths(st.session_state.current_space_id)
             
             # Check for required files first
             files_status = {
-                'transcript': os.path.exists(paths['transcript_path']),
-                'quotes': os.path.exists(paths['quotes_path']),
-                'summary': os.path.exists(paths['summary_path'])
+                'transcript': os.path.exists(storage_paths['transcript_path']),
+                'quotes': os.path.exists(storage_paths['quotes_path']),
+                'summary': os.path.exists(storage_paths['summary_path'])
             }
             
             if not files_status['transcript'] or not files_status['quotes']:
@@ -791,7 +782,7 @@ if check_password():
                     st.error("Missing quotes file")
             else:
                 # Load existing summary if available
-                existing_summary = load_summary(paths['summary_path']) if files_status['summary'] else None
+                existing_summary = load_summary(storage_paths['summary_path']) if files_status['summary'] else None
                 
                 # Show summary status
                 if existing_summary:
@@ -805,9 +796,9 @@ if check_password():
                     try:
                         with st.spinner("Reading files..."):
                             # Read transcript and quotes
-                            with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
+                            with open(storage_paths['transcript_path'], 'r', encoding='utf-8') as f:
                                 transcript = f.read()
-                            quotes = read_quotes(paths['quotes_path'])
+                            quotes = read_quotes(storage_paths['quotes_path'])
                             
                             if not transcript.strip():
                                 st.error("❌ Transcript file is empty")
@@ -817,11 +808,11 @@ if check_password():
                                 st.stop()
                         
                         with st.spinner("Generating summary..."):
-                            summary = generate_summary(transcript, quotes)
+                            summary = generate_summary(transcript, quotes, storage_paths['summary_path'])
                             
                             if summary['overview'] != "Error generating summary":
                                 # Save the summary
-                                save_summary(summary, paths['summary_path'])
+                                save_summary(summary, storage_paths['summary_path'])
                                 st.success("✨ Summary generated successfully!")
                                 existing_summary = summary  # Update the displayed summary
                                 st.rerun()  # Refresh to show new summary
@@ -864,8 +855,8 @@ if check_password():
         with st.expander("Detailed Logs", expanded=True):
             try:
                 with open('app.log', 'r') as f:
-                    logs = f.readlines()
-                    recent_logs = logs[-20:]  # Get last 20 lines
+                    logs_content = f.readlines()
+                    recent_logs = logs_content[-20:]  # Get last 20 lines
                     with stylable_container(
                         key="detailed_logs",
                         css_styles="""
@@ -942,10 +933,10 @@ if check_password():
                             
                             with col2:
                                 # Download button
-                                with open(selected_path, 'rb') as f:
+                                with open(selected_path, 'rb') as audio_file:
                                     st.download_button(
                                         "⬇️ Download",
-                                        f,
+                                        audio_file,
                                         file_name=selected_path.name,
                                         mime="audio/mpeg",
                                         help="Download the audio file"
@@ -958,8 +949,8 @@ if check_password():
                                     if st.button("⚠️ Confirm Delete", key="confirm_delete"):
                                         try:
                                             # Delete all associated files
-                                            paths = get_storage_paths(space_id)
-                                            for path in paths.values():
+                                            storage_paths = get_storage_paths(space_id)
+                                            for path in storage_paths.values():
                                                 if os.path.exists(path):
                                                     os.remove(path)
                                             st.success(f"Deleted all files for {selected_path.stem}")
@@ -980,14 +971,14 @@ if check_password():
                             
                             # Show file status
                             st.markdown("#### File Status")
-                            paths = get_storage_paths(space_id)
+                            storage_paths = get_storage_paths(space_id)
                             
                             # Check which associated files exist
                             details = {
-                                "Audio": os.path.exists(paths['audio_path']),
-                                "Transcript": os.path.exists(paths['transcript_path']),
-                                "Quotes": os.path.exists(paths['quotes_path']),
-                                "Summary": os.path.exists(paths['summary_path'])
+                                "Audio": os.path.exists(storage_paths['audio_path']),
+                                "Transcript": os.path.exists(storage_paths['transcript_path']),
+                                "Quotes": os.path.exists(storage_paths['quotes_path']),
+                                "Summary": os.path.exists(storage_paths['summary_path'])
                             }
                             
                             # Create status indicators
@@ -997,7 +988,7 @@ if check_password():
                                     icon = "✅" if exists else "❌"
                                     st.markdown(f"**{icon} {file_type}**")
                                     if exists:
-                                        size = Path(paths[file_type.lower() + '_path']).stat().st_size / 1024
+                                        size = Path(storage_paths[file_type.lower() + '_path']).stat().st_size / 1024
                                         if size < 1024:
                                             st.caption(f"{size:.1f} KB")
                                         else:

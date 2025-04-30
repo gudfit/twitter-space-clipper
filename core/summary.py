@@ -1,24 +1,25 @@
 """Core functionality for generating summaries from transcripts and quotes."""
 import json
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from utils.api import call_deepseek_api
 
 # Configure module logger
 logger = logging.getLogger(__name__)
 
-def generate_summary(transcript: str, quotes: List[str]) -> Dict[str, str]:
+def generate_summary(transcript: str, quotes: List[str], output_path: str) -> Dict[str, Union[str, List[str]]]:
     """Generate a comprehensive summary using both transcript and quotes.
     
     Args:
         transcript: The full transcript text to summarize
         quotes: List of key quotes extracted from the transcript
+        output_path: Path to save summary JSON
         
     Returns:
         Dict containing 'overview' (str) and 'key_points' (List[str])
         
     Example:
-        >>> summary = generate_summary(transcript, quotes)
+        >>> summary = generate_summary(transcript, quotes, output_path)
         >>> print(summary['overview'])
         >>> for point in summary['key_points']:
         >>>     print(f"- {point}")
@@ -68,10 +69,16 @@ And here are some key quotes that were identified:
             logger.warning("No key points extracted from summary")
             
         logger.info(f"Successfully generated summary with {len(key_points)} key points")
-        return {
-            "overview": overview,
-            "key_points": key_points
+        
+        # Generate summary
+        summary = {
+            'overview': overview,
+            'key_points': key_points
         }
+        
+        # Save summary
+        save_summary(summary, output_path)
+        return summary
         
     except Exception as e:
         logger.exception("Error generating summary")
@@ -80,29 +87,29 @@ And here are some key quotes that were identified:
             "key_points": []
         }
 
-def save_summary(summary: Dict[str, Any], path: str) -> None:
+def save_summary(summary: Dict[str, Union[str, List[str]]], output_path: str) -> None:
     """Save summary to a JSON file.
     
     Args:
         summary: Dictionary containing summary data
-        path: Path to save the JSON file
+        output_path: Path to save the JSON file
         
     Raises:
         IOError: If there's an error writing to the file
     """
     try:
-        with open(path, 'w', encoding='utf-8') as f:
+        with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=2)
-        logger.info(f"Summary saved to {path}")
+        logger.info(f"Summary saved to {output_path}")
     except IOError as e:
-        logger.error(f"Error saving summary to {path}: {e}")
+        logger.error(f"Error saving summary to {output_path}: {e}")
         raise
 
-def load_summary(path: str) -> Optional[Dict[str, Any]]:
+def load_summary(summary_path: str) -> Dict[str, Union[str, List[str]]]:
     """Load summary from a JSON file.
     
     Args:
-        path: Path to the JSON file to load
+        summary_path: Path to the JSON file to load
         
     Returns:
         Dictionary containing summary data or None if file doesn't exist
@@ -111,13 +118,16 @@ def load_summary(path: str) -> Optional[Dict[str, Any]]:
         json.JSONDecodeError: If the file contains invalid JSON
     """
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(summary_path, 'r', encoding='utf-8') as f:
             summary = json.load(f)
-        logger.info(f"Summary loaded from {path}")
+        logger.info(f"Summary loaded from {summary_path}")
         return summary
     except FileNotFoundError:
-        logger.warning(f"Summary file not found: {path}")
-        return None
+        logger.warning(f"Summary file not found: {summary_path}")
+        return {
+            "overview": "Error loading summary: File not found",
+            "key_points": []
+        }
     except json.JSONDecodeError as e:
-        logger.error(f"Error decoding summary JSON from {path}: {e}")
+        logger.error(f"Error decoding summary JSON from {summary_path}: {e}")
         raise 

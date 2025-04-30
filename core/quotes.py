@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 import re
 from dotenv import load_dotenv
@@ -92,10 +92,10 @@ def parse_transcript_segments(transcript: str, speakers: List[str]) -> List[Dict
     
     return segments
 
-def chunk_transcript(transcript: str, max_chunk_size: int = 8000) -> List[str]:
+def chunk_transcript(transcript: str, chunk_size: int = 50000) -> List[str]:
     """Split transcript into manageable chunks while preserving sentence boundaries."""
-    chunks = []
-    current_chunk = []
+    chunks: List[str] = []
+    current_chunk: List[str] = []
     current_size = 0
     
     # Split by sentences (roughly)
@@ -103,7 +103,7 @@ def chunk_transcript(transcript: str, max_chunk_size: int = 8000) -> List[str]:
     
     for sentence in sentences:
         sentence_size = len(sentence)
-        if current_size + sentence_size > max_chunk_size and current_chunk:
+        if current_size + sentence_size > chunk_size and current_chunk:
             # Join current chunk and add to chunks
             chunks.append(' '.join(current_chunk))
             current_chunk = [sentence]
@@ -197,19 +197,19 @@ Do not include any summary, heading, or commentary—just the quotes themselves,
         print(f"Error extracting quotes: {str(e)}")
         return []
 
-def create_quote_thread(transcript: str, space_info: Dict) -> List[str]:
-    """Create a thread of the best quotes from the content"""
+def create_quote_thread(transcript: str, speaker_info: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Create a thread of quotes from a transcript."""
     print("\n🎯 Starting quote generation process...")
     print(f"Transcript length: {len(transcript):,} characters")
-    print(f"Content info: {space_info}")  # Log content info for debugging
+    print(f"Content info: {speaker_info}")  # Log content info for debugging
     
-    if not space_info or not transcript:
+    if not speaker_info or not transcript:
         print("❌ Missing required data (content_info or transcript)")
         return []
     
     # Extract quotes for each speaker if speaker info available
     quotes = []
-    all_speakers = [space_info.get('host')] + space_info.get('speakers', []) if space_info.get('host') else space_info.get('speakers', [])
+    all_speakers = [speaker_info.get('host')] + speaker_info.get('speakers', []) if speaker_info.get('host') else speaker_info.get('speakers', [])
     
     if all_speakers:
         print(f"\n👥 Found {len(all_speakers)} speakers")
@@ -218,7 +218,7 @@ def create_quote_thread(transcript: str, space_info: Dict) -> List[str]:
             if not speaker:
                 print("⚠️ Skipping empty speaker name")
                 continue
-            speaker_quotes = extract_speaker_quotes(transcript, {'speaker': speaker, 'space_info': space_info})
+            speaker_quotes = extract_speaker_quotes(transcript, {'speaker': speaker, 'space_info': speaker_info})
             if speaker_quotes:
                 print(f"✅ Generated {len(speaker_quotes)} quotes for {speaker}")
                 quotes.extend(speaker_quotes)
@@ -262,7 +262,7 @@ def create_quote_thread(transcript: str, space_info: Dict) -> List[str]:
     print(f"\n🎉 Quote generation complete! Generated {len(quotes)} total quotes")
     return quotes
 
-def format_quote_tweet(quote: str, speaker: str, context: str = '', speaker_info: Dict = None) -> str:
+def format_quote_tweet(quote: str, speaker: str, context: str = '', speaker_info: Optional[Dict[str, Any]] = None) -> str:
     """Format a quote as a tweet with proper attribution and context"""
     # Get speaker's role or affiliation if available
     role = speaker_info.get('roles', {}).get(speaker, '') if speaker_info else ''
