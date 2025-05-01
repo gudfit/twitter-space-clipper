@@ -1,28 +1,71 @@
-import whisper
-import argparse
+"""Core functionality for transcribing audio files."""
+import os
+import logging
+from typing import Optional, Dict, Any
+import whisper  # type: ignore
+import torch
 
-def transcribe_audio(audio_path, model_name="base"):
-    """
-    Transcribe audio using OpenAI's Whisper model
+# Configure module logger
+logger = logging.getLogger(__name__)
+
+def transcribe_audio(audio_path: str, progress_callback: Optional[Dict[str, Any]] = None) -> str:
+    """Transcribe audio file using Whisper."""
+    logger.info(f"Starting transcription of {audio_path}")
     
-    Args:
-        audio_path (str): Path to the audio file
-        model_name (str): Name of the Whisper model to use 
-                         (tiny, base, small, medium, large)
-    """
-    # Load the model
-    print(f"Loading Whisper model: {model_name}")
-    model = whisper.load_model(model_name)
-    
-    # Transcribe the audio
-    print("Transcribing audio...")
-    result = model.transcribe(audio_path)
-    
-    # Print the transcription
-    print("\nTranscription:")
-    print(result["text"])
-    
-    return result["text"]
+    try:
+        # Load audio file
+        if progress_callback:
+            progress_callback.update({
+                'status': 'Loading audio file...',
+                'progress': 0.1
+            })
+        audio = whisper.load_audio(audio_path)
+        
+        # Load model
+        if progress_callback:
+            progress_callback.update({
+                'status': 'Loading Whisper model...',
+                'progress': 0.2
+            })
+        model = whisper.load_model("base")
+        
+        # Detect language
+        if progress_callback:
+            progress_callback.update({
+                'status': 'Detecting language...',
+                'progress': 0.3
+            })
+        audio_features = whisper.pad_or_trim(audio)
+        mel = whisper.log_mel_spectrogram(audio_features).to(model.device)
+        _, probs = model.detect_language(mel)
+        detected_language = max(probs, key=probs.get)
+        logger.info(f"Detected language: {detected_language}")
+        
+        if progress_callback:
+            progress_callback.update({
+                'status': f'Transcribing audio (detected language: {detected_language})...',
+                'progress': 0.4
+            })
+        
+        # Transcribe
+        result = model.transcribe(
+            audio,
+            language=detected_language,
+            fp16=False,
+            verbose=True
+        )
+        
+        if progress_callback:
+            progress_callback.update({
+                'status': 'Transcription complete',
+                'progress': 1.0
+            })
+        
+        return result["text"]
+        
+    except Exception as e:
+        logger.error(f"Error transcribing audio: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Transcribe audio using OpenAI's Whisper")

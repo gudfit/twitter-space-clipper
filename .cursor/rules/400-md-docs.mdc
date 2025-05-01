@@ -1,8 +1,8 @@
 ---
-description: ALWAYS use when writing or updating Markdown files to ensure consistent formatting and readability. This rule enforces standardized Markdown practices across all documentation.
-globs: *.md,*.mdc
-alwaysApply: false
+description: ALWAYS follow Markdown documentation standards when writing or updating Markdown files to ensure consistent formatting and readability
+globs: **/*.md
 ---
+alwaysApply: false
 # Markdown Documentation Standards
 
 ## Requirements
@@ -111,9 +111,7 @@ Use Mermaid diagrams to visualize:
 
 <example>
 ```mermaid
----
 title: Example Workflow
----
 graph TD
     A[Start] --> B{Decision}
     B -->|Yes| C[Process 1]

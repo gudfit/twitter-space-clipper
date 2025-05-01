@@ -1,0 +1,50 @@
+---
+description: ALWAYS use hashlib.md5 for space ID generation when handling media spaces, state files, or process tracking
+globs: **/*.py
+alwaysApply: false
+---
+# Space ID Generation Rule
+
+## Context
+- When generating unique identifiers for media spaces/URLs
+- When storing or retrieving state files, downloads, or other artifacts
+- When tracking process state across different components
+
+## Requirements
+- ALWAYS use `hashlib.md5(url.encode()).hexdigest()` for generating space IDs
+- NEVER use URL path splitting (e.g., `url.strip('/').split('/')[-1]`) for ID generation
+- Import `hashlib` at the module level when space ID generation is needed
+- Use the `get_space_id()` function from `core.processor` when possible
+- Document the space ID generation method in function docstrings
+
+## Examples
+<example>
+# Good: Consistent space ID generation
+def get_space_id(url: str) -> str:
+    """Get unique ID for a space URL."""
+    return hashlib.md5(url.encode()).hexdigest()
+
+# Using the function
+space_id = get_space_id(url)
+state_file = f"storage/state/{space_id}.json"
+</example>
+
+<example type="invalid">
+# Bad: Inconsistent ID generation using URL splitting
+space_id = url.strip('/').split('/')[-1]  # DON'T DO THIS
+state_file = f"storage/state/{space_id}.json"
+
+# Bad: Different hashing method
+space_id = hashlib.sha256(url.encode()).hexdigest()  # DON'T DO THIS
+</example>
+
+## Technical Notes
+- MD5 is used for consistent, short IDs (not for cryptographic security)
+- Hash the full URL to avoid collisions from different URLs with same path endings
+- State files and artifacts are stored using the hex digest as filenames
+- This ensures consistent tracking across:
+  - State files
+  - Downloaded media
+  - Transcripts
+  - Quotes
+  - Summaries

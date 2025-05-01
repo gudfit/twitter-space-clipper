@@ -1,91 +1,100 @@
 """Core functionality for generating summaries from transcripts and quotes."""
 import json
 import logging
+import os
 from typing import Dict, List, Optional, Any, Union
 from utils.api import call_deepseek_api
 
 # Configure module logger
 logger = logging.getLogger(__name__)
 
-def generate_summary(transcript: str, quotes: List[str], output_path: str) -> Dict[str, Union[str, List[str]]]:
-    """Generate a comprehensive summary using both transcript and quotes.
-    
-    Args:
-        transcript: The full transcript text to summarize
-        quotes: List of key quotes extracted from the transcript
-        output_path: Path to save summary JSON
-        
-    Returns:
-        Dict containing 'overview' (str) and 'key_points' (List[str])
-        
-    Example:
-        >>> summary = generate_summary(transcript, quotes, output_path)
-        >>> print(summary['overview'])
-        >>> for point in summary['key_points']:
-        >>>     print(f"- {point}")
-    """
-    logger.info("Starting summary generation...")
+def generate_summary(transcript: str, quotes: List[str], output_path: str, progress_callback: Optional[Dict[str, Any]] = None) -> Dict[str, Union[str, List[str]]]:
+    """Generate a summary of the transcript and quotes."""
+    logger.info("Starting summary generation")
     
     try:
-        # First, get a high-level summary from DeepSeek
-        response = call_deepseek_api([
-            {"role": "system", "content": """You are an expert at summarizing content. Create a clear, engaging summary that captures the main points and key insights. Focus on providing value to someone who hasn't heard the original content. Keep formatting minimal and clean."""},
-            {"role": "user", "content": f"""Please summarize this content with:
-1. A brief overview paragraph (2-3 sentences)
-2. 4-6 key points as simple bullet points
-
-Here's the transcript:
-{transcript}
-
-And here are some key quotes that were identified:
-{chr(10).join(quotes)}"""}
-        ])
+        if progress_callback:
+            progress_callback.update({
+                'status': 'Analyzing transcript...',
+                'progress': 0.1
+            })
         
-        if not response:
-            logger.error("No response received from DeepSeek API")
-            return {
-                "overview": "Error generating summary: No response from API",
-                "key_points": []
-            }
-
-        # Parse the response into overview and key points
-        content = response['content']
-        logger.debug(f"Received content of length: {len(content)}")
+        # Split transcript into sections
+        sections = split_into_sections(transcript)
+        total_sections = len(sections)
         
-        # Split into sections and clean up
-        sections = content.split('\n\n')
-        overview = sections[0].strip()
+        if progress_callback:
+            progress_callback.update({
+                'status': f'Processing {total_sections} sections...',
+                'progress': 0.2
+            })
         
-        # Extract bullet points (looking for lines starting with • or -)
-        key_points = []
-        for line in content.split('\n'):
-            line = line.strip()
-            if line.startswith('•') or line.startswith('-'):
-                point = line.lstrip('•- ').strip()
-                if point:
-                    key_points.append(point)
-
-        if not key_points:
-            logger.warning("No key points extracted from summary")
+        # Generate section summaries
+        section_summaries = []
+        for i, section in enumerate(sections):
+            if progress_callback:
+                progress = 0.2 + (0.4 * (i / total_sections))  # Scale from 20% to 60%
+                progress_callback.update({
+                    'status': f'Summarizing section {i+1}/{total_sections}',
+                    'progress': progress
+                })
             
-        logger.info(f"Successfully generated summary with {len(key_points)} key points")
+            summary = summarize_section(section)
+            section_summaries.append(summary)
+            
+            # Log progress
+            logger.info(f"Summarized section {i+1}/{total_sections}")
         
-        # Generate summary
+        # Analyze quotes
+        if progress_callback:
+            progress_callback.update({
+                'status': 'Analyzing quotes...',
+                'progress': 0.7
+            })
+        
+        quote_insights = analyze_quotes(quotes)
+        
+        # Generate final summary
+        if progress_callback:
+            progress_callback.update({
+                'status': 'Generating final summary...',
+                'progress': 0.8
+            })
+        
+        final_summary = combine_summaries(section_summaries, quote_insights)
+        
+        # Create summary dict
         summary = {
-            'overview': overview,
-            'key_points': key_points
+            'overview': final_summary,
+            'key_points': extract_key_points(final_summary)
         }
         
         # Save summary
+        if progress_callback:
+            progress_callback.update({
+                'status': 'Saving summary...',
+                'progress': 0.9
+            })
+        
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         save_summary(summary, output_path)
+        
+        if progress_callback:
+            progress_callback.update({
+                'status': 'Summary generation complete',
+                'progress': 1.0
+            })
+        
         return summary
         
     except Exception as e:
-        logger.exception("Error generating summary")
-        return {
-            "overview": f"Error generating summary: {str(e)}",
-            "key_points": []
-        }
+        logger.error(f"Error generating summary: {str(e)}")
+        if progress_callback:
+            progress_callback.update({
+                'status': f'Error: {str(e)}',
+                'progress': 0.0
+            })
+        raise
 
 def save_summary(summary: Dict[str, Union[str, List[str]]], output_path: str) -> None:
     """Save summary to a JSON file.

@@ -1,0 +1,107 @@
+---
+description: ALWAYS follow task chain best practices when implementing Celery tasks to ensure proper state management and error handling
+globs: **/*.py
+---
+alwaysApply: false
+# Celery Task Chain Best Practices
+
+## Context
+- When implementing Celery task chains with multiple tasks
+- When tasks need to pass results through the chain
+- When tasks need to maintain state across the chain
+
+## Requirements
+- Use immutable signature (.si()) for the first task to prevent argument chaining issues
+- Use mutable signatures (.s()) for subsequent tasks to pass results through the chain
+- Maintain consistent ProcessState type across all tasks
+- Include task_id in all state updates
+- Initialize all ProcessState fields with proper defaults
+- Use proper error handling and state updates in each task
+- Avoid circular imports by importing within functions
+
+## Examples
+
+<example>
+# Good: Proper task chain setup with immutable first task
+def process_space_chain(url: str, storage_dir: str) -> chain:
+    return chain(
+        download_media.si(url, storage_dir),  # Immutable first task
+        transcribe_media.s(),  # Mutable for result passing
+        generate_quotes_task.s(),
+        generate_summary_task.s()
+    )
+</example>
+
+<example type="invalid">
+# Bad: All tasks using mutable signatures
+def process_space_chain(url: str, storage_dir: str) -> chain:
+    return chain(
+        download_media.s(url, storage_dir),  # Can cause argument chaining issues
+        transcribe_media.s(),
+        generate_quotes_task.s(),
+        generate_summary_task.s()
+    )
+</example>
+
+<example>
+# Good: Proper state initialization and task_id tracking
+state: ProcessState = {
+    'status': 'processing',
+    'stage': stage,
+    'progress': progress,
+    'stage_status': status,
+    'last_updated': datetime.now().isoformat(),
+    'error': None,
+    'files': files or {},
+    'current_chunk': None,
+    'total_chunks': None,
+    'completed_chunks': [],
+    'console_output': '',  # Initialize as empty string
+    'task_id': self.request.id
+}
+</example>
+
+<example type="invalid">
+# Bad: Incomplete state initialization
+state = {
+    'status': 'processing',
+    'stage': stage,
+    'progress': progress
+    # Missing required fields
+    # No task_id tracking
+}
+</example>
+
+<example>
+# Good: Proper error handling with state update
+try:
+    result = process_task()
+    return result
+except Exception as e:
+    error_state: ProcessState = {
+        'status': 'error',
+        'stage': current_stage,
+        'progress': 0.0,
+        'stage_status': str(e),
+        'last_updated': datetime.now().isoformat(),
+        'error': str(e),
+        'files': current_files,
+        'current_chunk': None,
+        'total_chunks': None,
+        'completed_chunks': [],
+        'console_output': '',
+        'task_id': self.request.id
+    }
+    save_process_state(storage_dir, space_id, error_state)
+    raise
+</example>
+
+<example type="invalid">
+# Bad: Missing error state update
+try:
+    result = process_task()
+    return result
+except Exception as e:
+    # No state update before re-raising
+    raise
+</example>

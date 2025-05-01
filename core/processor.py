@@ -8,6 +8,7 @@ import time
 import subprocess
 import sys
 import io
+import hashlib
 from contextlib import redirect_stdout, redirect_stderr
 from typing import Dict, Optional, Protocol, Any, Callable, List, TypedDict, Union
 from pathlib import Path
@@ -193,17 +194,8 @@ class ProcessLock:
             logger.error(f"Error breaking stale lock: {e}")
 
 def get_space_id(url: str) -> str:
-    """Extract space ID from URL and create a hash for storage.
-    
-    Args:
-        url: The URL to process
-        
-    Returns:
-        A hash string identifying the space
-    """
-    import hashlib
-    space_id = url.strip('/').split('/')[-1]
-    return hashlib.md5(space_id.encode()).hexdigest()
+    """Get unique ID for a space URL."""
+    return hashlib.md5(url.encode()).hexdigest()
 
 def get_storage_paths(storage_root: str, space_id: str) -> StoragePaths:
     """Get paths for storing space data.

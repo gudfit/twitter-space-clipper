@@ -19,6 +19,11 @@ celery_app = Celery(
     include=["celery_worker.tasks"],  # <-- This line is key!
 )
 
+# Configure logging
+import logging
+logger = logging.getLogger('celery')
+logger.setLevel(logging.INFO)
+
 # Optional: Additional configuration
 celery_app.conf.update(
     task_serializer="json",
@@ -28,4 +33,17 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_time_limit=60 * 60 * 2,  # 2 hours max per task
+    task_routes={
+        'celery_worker.tasks.download_media': {'queue': 'download'},
+        'celery_worker.tasks.transcribe_media': {'queue': 'transcribe'},
+        'celery_worker.tasks.generate_quotes_task': {'queue': 'generate'},
+        'celery_worker.tasks.generate_summary_task': {'queue': 'generate'},
+    },
+    task_publish_retry=True,
+    task_publish_retry_policy={
+        'max_retries': 3,
+        'interval_start': 0,
+        'interval_step': 0.2,
+        'interval_max': 0.5,
+    },
 )

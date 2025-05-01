@@ -1,10 +1,13 @@
+---
+description: ALWAYS follow Celery task best practices when implementing Celery tasks to avoid common pitfalls and ensure proper task registration
+globs: **/*.py
+---
 # 002-celery-tasks: Celery Integration Best Practices
 
 ## Rule Description
 
 When adding or modifying Celery tasks in this codebase, follow these best practices to ensure reliable task registration, avoid circular imports, and guarantee smooth development and deployment.
 
----
 
 ## Requirements
 
@@ -44,7 +47,6 @@ When adding or modifying Celery tasks in this codebase, follow these best practi
 - **Project Structure:**
   - Ensure all relevant directories (`celery_worker/`, `tests/`) contain an `__init__.py` file to make them Python packages.
 
----
 
 ## Common Pitfalls & Solutions
 
@@ -59,7 +61,6 @@ When adding or modifying Celery tasks in this codebase, follow these best practi
     ```
   - This is especially important when running tests or scripts from subdirectories.
 
----
 
 ## Example
 
@@ -81,6 +82,5 @@ def add(x, y):
 from celery_worker.tasks import add  # Requires PYTHONPATH=. to work
 ```
 
----
 
 > 💡 **Tip:** If you see `ModuleNotFoundError`, always try running your script with `PYTHONPATH=.` first. This is a common issue when running tests or scripts that need to import from your project's root package. 

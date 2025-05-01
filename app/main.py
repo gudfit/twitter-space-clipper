@@ -9,13 +9,14 @@ import hashlib
 import shutil
 import yt_dlp  # type: ignore
 import re
-from typing import Optional, Dict, Any, List, Tuple, Callable, TextIO, BinaryIO, Protocol, Union, cast
+from typing import Optional, Dict, Any, List, Tuple, Callable, TextIO, BinaryIO, Protocol, Union, cast, Literal
 import time
 import logging
 from streamlit_extras.stylable_container import stylable_container  # type: ignore
 from datetime import datetime, timedelta
-from celery.result import AsyncResult
-from celery_worker.tasks import app as celery_app
+from celery.result import AsyncResult  # type: ignore
+from celery_worker.tasks import app as celery_app  # type: ignore
+from celery import chain  # Add this import
 
 from core.types import ProcessState, StoragePaths
 
@@ -72,6 +73,40 @@ st.set_page_config(
     page_icon="🎙️",
     layout="wide"
 )
+
+# Check dependencies
+def check_dependencies():
+    """Check if all required dependencies are installed."""
+    missing_deps = []
+    
+    # Check system ffmpeg
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        missing_deps.append("System ffmpeg")
+    
+    # Check Python packages
+    try:
+        import ffmpeg  # type: ignore
+    except ImportError:
+        missing_deps.append("ffmpeg-python")
+    
+    return missing_deps
+
+# Check dependencies before proceeding
+missing_dependencies = check_dependencies()
+if missing_dependencies:
+    st.error("""
+    ⚠️ Missing required dependencies:
+    {}
+    
+    Please install the missing dependencies:
+    - For system ffmpeg: `sudo apt-get install ffmpeg`
+    - For ffmpeg-python: `pip install ffmpeg-python`
+    
+    After installing, please restart the application.
+    """.format("\n".join(f"- {dep}" for dep in missing_dependencies)))
+    st.stop()
 
 # Authentication
 def check_password():
@@ -290,6 +325,15 @@ if check_password():
     def check_process_state(space_id: str) -> ProcessState:
         """Check the current state of processing for a space."""
         state = get_process_state(str(STORAGE_DIR), space_id)
+        storage_paths = get_storage_paths(str(STORAGE_DIR), space_id)
+        
+        # Check if all files exist and are valid
+        files_status = {
+            'audio': os.path.exists(storage_paths['audio_path']) and os.path.getsize(storage_paths['audio_path']) > 0,
+            'transcript': os.path.exists(storage_paths['transcript_path']) and os.path.getsize(storage_paths['transcript_path']) > 0,
+            'quotes': os.path.exists(storage_paths['quotes_path']) and os.path.getsize(storage_paths['quotes_path']) > 0,
+            'summary': os.path.exists(storage_paths['summary_path']) and os.path.getsize(storage_paths['summary_path']) > 0
+        }
         
         # Only check for stale process if enough time has passed since last check
         current_time = time.time()
@@ -302,35 +346,77 @@ if check_password():
             if 'task_id' in state:
                 try:
                     result = AsyncResult(state['task_id'], app=celery_app)
-                    if result.ready():
-                        if result.successful():
+                    
+                    # Function to get the current active task in the chain
+                    def get_current_task(result):
+                        if result.parent:
+                            if not result.parent.ready():
+                                return result.parent
+                            return get_current_task(result.parent)
+                        return result
+                    
+                    # Get current task in chain
+                    current_task = get_current_task(result)
+                    
+                    if current_task.ready():
+                        if current_task.successful():
                             # Task completed successfully
-                            if state['status'] != 'complete':
+                            if all(files_status.values()):
                                 state.update({
                                     'status': 'complete',
                                     'stage': None,
                                     'progress': 1.0,
+                                    'files': files_status,
                                     'last_updated': datetime.now().isoformat()
                                 })
                                 save_process_state(str(STORAGE_DIR), space_id, state)
+                                logger.info(f"Process {space_id} completed successfully")
+                            else:
+                                # Some files are missing despite task completion
+                                state.update({
+                                    'status': 'error',
+                                    'error': 'Task completed but some files are missing',
+                                    'stage': None,
+                                    'progress': 0.0,
+                                    'files': files_status,
+                                    'last_updated': datetime.now().isoformat()
+                                })
+                                save_process_state(str(STORAGE_DIR), space_id, state)
+                                logger.error(f"Process {space_id} completed but files missing: {[k for k, v in files_status.items() if not v]}")
                         else:
                             # Task failed
-                            error = str(result.get(propagate=False))
+                            error = str(current_task.get(propagate=False))
                             state.update({
                                 'status': 'error',
                                 'error': error,
                                 'stage': None,
                                 'progress': 0.0,
+                                'files': files_status,
                                 'last_updated': datetime.now().isoformat()
                             })
                             save_process_state(str(STORAGE_DIR), space_id, state)
+                            logger.error(f"Process {space_id} failed: {error}")
                     else:
-                        # Task is still running, get current task in chain
-                        current_task = result.parent if result.parent else result
-                        if current_task and current_task.state != 'PENDING':
-                            # Update last_updated timestamp to prevent timeout
-                            state['last_updated'] = datetime.now().isoformat()
+                        # Task is still running
+                        if current_task.state != 'PENDING':
+                            # Get task name from the current task
+                            task_name = current_task.name.split('.')[-1].replace('_task', '')
+                            
+                            # Get progress from state file since task might have updated it
+                            current_state = get_process_state(str(STORAGE_DIR), space_id)
+                            progress = current_state.get('progress', 0.0)
+                            stage_status = current_state.get('stage_status', '')
+                            
+                            state.update({
+                                'status': 'processing',
+                                'stage': task_name,
+                                'progress': progress,
+                                'stage_status': stage_status,
+                                'files': files_status,
+                                'last_updated': datetime.now().isoformat()
+                            })
                             save_process_state(str(STORAGE_DIR), space_id, state)
+                            logger.debug(f"Process {space_id} running task: {task_name} ({progress:.1%})")
                 except Exception as e:
                     logger.error(f"Error checking task status: {e}")
             
@@ -340,7 +426,6 @@ if check_password():
                 if last_updated_str:
                     last_updated = datetime.fromisoformat(last_updated_str)
                     time_since_update = datetime.now() - last_updated
-                    logger.debug(f"Process state last updated: {time_since_update} ago")
                     
                     # Only mark as error if significantly stale (> 1 hour)
                     if time_since_update > timedelta(hours=1):
@@ -350,6 +435,7 @@ if check_password():
                             'error': 'Process timed out - no updates for over an hour',
                             'stage': None,
                             'progress': 0.0,
+                            'files': files_status,
                             'last_updated': datetime.now().isoformat()
                         })
                         save_process_state(str(STORAGE_DIR), space_id, state)
@@ -359,537 +445,272 @@ if check_password():
         return state
 
     def display_process_state(state: ProcessState, container: Any) -> None:
-        """Display the current process state in the UI."""
-        status = state['status']
-        files = state.get('files', {})
-        stage = state.get('stage')
-        stage_status = state.get('stage_status', '')
-        
-        with container:
-            if status == 'processing':
-                # Show stage-specific progress information
-                progress = state['progress']
+        """Display current process state in the UI."""
+        try:
+            # Get stage-specific progress info
+            stage = state.get('stage', 'unknown')
+            progress = state.get('progress', 0.0)
+            status = state.get('stage_status', '')
+            error = state.get('error')
+            files = state.get('files', {})
+            
+            # Show error if present
+            if error:
+                container.error(f"Error: {error}")
+                return
+            
+            # Show stage-specific progress
+            if stage == 'download':
+                container.progress(progress, f"Downloading media... {status}")
+            elif stage == 'transcribe':
+                container.progress(progress, f"Transcribing audio... {status}")
+            elif stage == 'quotes':
+                container.progress(progress, f"Generating quotes... {status}")
+            elif stage == 'summary':
+                container.progress(progress, f"Creating summary... {status}")
+            else:
+                container.progress(progress, status or "Processing...")
+            
+            # Show file status
+            if files:
+                container.write("Files:")
+                cols = container.columns(4)
+                for i, (file_type, exists) in enumerate(files.items()):
+                    with cols[i]:
+                        icon = "✅" if exists else "⏳"
+                        container.markdown(f"**{icon} {file_type.title()}**")
+            
+            # Show console output if available
+            console_output = state.get('console_output')
+            if console_output:
+                with container.expander("Show Details", expanded=False):
+                    container.text(console_output)
                 
-                # Create progress display based on stage
-                if stage == 'download':
-                    st.info("⬇️ Downloading Media")
-                    st.progress(progress)
-                    # Show download output in collapsible section
-                    with st.expander("Download Details", expanded=False):
-                        st.caption(str(stage_status))
-                        if state.get('console_output'):
-                            with stylable_container(
-                                key="download_output",
-                                css_styles="""
-                                    code {
-                                        white-space: pre-wrap !important;
-                                        max-height: 200px;
-                                        overflow-y: auto;
-                                    }
-                                    """
-                            ):
-                                st.code(state['console_output'], language="text")
-                
-                elif stage == 'transcribe':
-                    st.info("🎯 Transcribing Audio")
-                    st.progress(progress)
-                    
-                    # Show transcription details in collapsible section
-                    with st.expander("Transcription Details", expanded=False):
-                        # Show transcription details
-                        last_updated_str = state.get('last_updated')
-                        if last_updated_str:
-                            last_updated = datetime.fromisoformat(last_updated_str)
-                            time_since = datetime.now() - last_updated
-                            
-                            # Show elapsed time with appropriate units
-                            if time_since < timedelta(minutes=1):
-                                elapsed = f"{time_since.seconds} seconds"
-                            elif time_since < timedelta(hours=1):
-                                elapsed = f"{time_since.seconds // 60} minutes"
-                            else:
-                                elapsed = f"{time_since.seconds // 3600} hours"
-                            
-                            # Show file being transcribed
-                            if files.get('audio', False):
-                                paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
-                                audio_path = paths['audio_path']
-                                file_size = os.path.getsize(audio_path) / (1024 * 1024)  # Convert to MB
-                                st.caption(f"🎵 Transcribing: {Path(audio_path).name} ({file_size:.1f} MB)")
-                            
-                            # Show elapsed time and model info
-                            st.caption(f"⏱️ Elapsed time: {elapsed}")
-                            st.caption("🤖 Using OpenAI Whisper base model")
-                            
-                            # Show console output if available
-                            if state.get('console_output'):
-                                with stylable_container(
-                                    key="transcribe_output",
-                                    css_styles="""
-                                        code {
-                                            white-space: pre-wrap !important;
-                                            max-height: 200px;
-                                            overflow-y: auto;
-                                        }
-                                        """
-                                ):
-                                    st.code(state['console_output'], language="text")
-                    
-                    st.caption(str(stage_status))
-                
-                elif stage == 'quotes':
-                    st.info("✍️ Generating Quotes")
-                    st.progress(progress)
-                    
-                    # Show quote generation details in collapsible section
-                    with st.expander("Quote Generation Details", expanded=True):
-                        last_updated_str = state.get('last_updated')
-                        if last_updated_str:
-                            last_updated = datetime.fromisoformat(last_updated_str)
-                            time_since = datetime.now() - last_updated
-                            
-                            # Show elapsed time with appropriate units
-                            if time_since < timedelta(minutes=1):
-                                elapsed = f"{time_since.seconds} seconds"
-                            elif time_since < timedelta(hours=1):
-                                elapsed = f"{time_since.seconds // 60} minutes"
-                            else:
-                                elapsed = f"{time_since.seconds // 3600} hours"
-                            
-                            # Show transcript details
-                            if files.get('transcript', False):
-                                paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
-                                transcript_path = paths['transcript_path']
-                                with open(transcript_path, 'r', encoding='utf-8') as f:
-                                    transcript = f.read()
-                                
-                                # Get chunk information
-                                chunks = chunk_transcript(transcript)
-                                total_chunks = len(chunks)
-                                current_chunk = int(progress * total_chunks) if progress > 0 else 0
-                                
-                                # Show chunk progress
-                                st.caption(f"📊 Processing chunk {current_chunk}/{total_chunks}")
-                                st.caption(f"📝 Total transcript length: {len(transcript):,} characters")
-                            
-                            # Show elapsed time and model info
-                            st.caption(f"⏱️ Elapsed time: {elapsed}")
-                            st.caption("🤖 Using DeepSeek for quote extraction")
-                            
-                            # Show console output if available
-                            if state.get('console_output'):
-                                with stylable_container(
-                                    key="quotes_output",
-                                    css_styles="""
-                                        code {
-                                            white-space: pre-wrap !important;
-                                            max-height: 400px;
-                                            overflow-y: auto;
-                                        }
-                                        """
-                                ):
-                                    st.code(state['console_output'], language="text")
-                        
-                        st.caption(str(stage_status))
-                
-                elif stage == 'summary':
-                    st.info("📝 Creating Summary")
-                    st.progress(progress)
-                    
-                    # Show summary generation details in collapsible section
-                    with st.expander("Summary Generation Details", expanded=False):
-                        last_updated_str = state.get('last_updated')
-                        if last_updated_str:
-                            last_updated = datetime.fromisoformat(last_updated_str)
-                            time_since = datetime.now() - last_updated
-                            
-                            # Show elapsed time with appropriate units
-                            if time_since < timedelta(minutes=1):
-                                elapsed = f"{time_since.seconds} seconds"
-                            elif time_since < timedelta(hours=1):
-                                elapsed = f"{time_since.seconds // 60} minutes"
-                            else:
-                                elapsed = f"{time_since.seconds // 3600} hours"
-                            
-                            # Show input details
-                            if files.get('transcript', False) and files.get('quotes', False):
-                                paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
-                                
-                                # Show transcript info
-                                with open(paths['transcript_path'], 'r', encoding='utf-8') as f:
-                                    transcript = f.read()
-                                st.caption(f"📝 Processing transcript: {len(transcript):,} characters")
-                                
-                                # Show quotes info
-                                quotes = read_quotes(paths['quotes_path'])
-                                st.caption(f"✍️ Using {len(quotes)} generated quotes")
-                            
-                            # Show elapsed time and model info
-                            st.caption(f"⏱️ Elapsed time: {elapsed}")
-                            st.caption("🤖 Using DeepSeek for summarization")
-                            
-                            # Show console output if available
-                            if state.get('console_output'):
-                                with stylable_container(
-                                    key="summary_output",
-                                    css_styles="""
-                                        code {
-                                            white-space: pre-wrap !important;
-                                            max-height: 200px;
-                                            overflow-y: auto;
-                                        }
-                                        """
-                                ):
-                                    st.code(state['console_output'], language="text")
-                            
-                            # Show stages of summary generation
-                            if progress < 0.3:
-                                st.caption("📊 Analyzing transcript...")
-                            elif progress < 0.6:
-                                st.caption("📝 Extracting key points...")
-                            elif progress < 0.9:
-                                st.caption("✨ Generating overview...")
-                            else:
-                                st.caption("💾 Saving summary...")
-                        
-                        st.caption(str(stage_status))
-                else:
-                    stage_display = stage if stage else "Unknown"
-                    st.info(f"🔄 Processing: {stage_display} ({progress*100:.0f}%)")
-                    st.progress(progress)
-                
-                # Show file status
-                if files:
-                    st.markdown("#### File Status")
-                    cols = st.columns([1, 1, 1, 1])
-                    file_types = ['audio', 'transcript', 'quotes', 'summary']
-                    file_icons = {
-                        'audio': '🎵',
-                        'transcript': '📝',
-                        'quotes': '✍️',
-                        'summary': '📋'
-                    }
-                    for i, file_type in enumerate(file_types):
-                        with cols[i]:
-                            exists = files.get(file_type, False)
-                            icon = "✅" if exists else "❌"
-                            emoji = file_icons.get(file_type, '')
-                            
-                            # Add processing indicator for current stage
-                            if stage and stage.lower() == file_type:
-                                st.markdown(f"**{icon} {emoji} {file_type.title()}** 🔄")
-                            else:
-                                st.markdown(f"**{icon} {emoji} {file_type.title()}**")
-                            
-                            # Show file size if exists
-                            if exists:
-                                try:
-                                    paths = get_storage_paths(str(STORAGE_DIR), st.session_state.current_space_id)
-                                    # Type-safe path access based on file type
-                                    if file_type == 'audio':
-                                        size = Path(paths['audio_path']).stat().st_size / 1024  # KB
-                                    elif file_type == 'transcript':
-                                        size = Path(paths['transcript_path']).stat().st_size / 1024  # KB
-                                    elif file_type == 'quotes':
-                                        size = Path(paths['quotes_path']).stat().st_size / 1024  # KB
-                                    elif file_type == 'summary':
-                                        size = Path(paths['summary_path']).stat().st_size / 1024  # KB
-                                    
-                                    if size > 1024:
-                                        st.caption(f"{size/1024:.1f} MB")
-                                    else:
-                                        st.caption(f"{size:.1f} KB")
-                                except Exception:
-                                    pass
-                
-                # Show last update time if available
-                last_updated_str = state.get('last_updated')
-                if last_updated_str and stage not in ['transcribe', 'quotes', 'summary']:  # Don't show twice for these stages
-                    last_updated = datetime.fromisoformat(last_updated_str)
-                    time_since = datetime.now() - last_updated
-                    if time_since < timedelta(minutes=1):
-                        st.caption(f"Last updated: {time_since.seconds} seconds ago")
-                    elif time_since < timedelta(hours=1):
-                        st.caption(f"Last updated: {time_since.seconds // 60} minutes ago")
-                    else:
-                        st.caption(f"Last updated: {time_since.seconds // 3600} hours ago")
-                
-            elif status == 'error':
-                error_msg = state.get('error', 'Unknown error')
-                st.error(f"❌ Error: {error_msg}")
-                
-                # Show file status if any files exist
-                if any(files.values()):
-                    st.markdown("#### Existing Files")
-                    cols = st.columns([1, 1, 1, 1])
-                    file_types = ['audio', 'transcript', 'quotes', 'summary']
-                    for i, file_type in enumerate(file_types):
-                        with cols[i]:
-                            exists = files.get(file_type, False)
-                            if exists:
-                                st.markdown(f"✅ {file_type.title()}")
-                
-                if st.button("🔄 Retry Processing"):
-                    # Check current file status
-                    paths = get_storage_paths(str(STORAGE_DIR), space_id)
-                    files_exist = {
-                        'audio': os.path.exists(paths['audio_path']),
-                        'transcript': os.path.exists(paths['transcript_path']),
-                        'quotes': os.path.exists(paths['quotes_path']),
-                        'summary': os.path.exists(paths['summary_path'])
-                    }
-                    # Clear error state but preserve file status
-                    state.update({
-                        'status': 'processing',
-                        'stage': None,
-                        'error': None,
-                        'progress': 0.0,
-                        'files': files_exist
-                    })
-                    save_process_state(str(STORAGE_DIR), space_id, state)
-                    st.rerun()
-                
-            elif status == 'complete':
-                if all(files.values()):
-                    st.success("✅ Processing complete!")
-                else:
-                    # Some files are missing despite complete status
-                    missing = [file_type for file_type in ['audio', 'transcript', 'quotes', 'summary'] 
-                              if not files.get(file_type, False)]
-                    st.warning(f"⚠️ Processing marked complete but missing files: {', '.join(missing)}")
-                    if st.button("🔄 Reprocess Missing Files"):
-                        # Check current file status
-                        paths = get_storage_paths(str(STORAGE_DIR), space_id)
-                        files_exist = {
-                            'audio': os.path.exists(paths['audio_path']),
-                            'transcript': os.path.exists(paths['transcript_path']),
-                            'quotes': os.path.exists(paths['quotes_path']),
-                            'summary': os.path.exists(paths['summary_path'])
-                        }
-                        state.update({
-                            'status': 'processing',
-                            'stage': None,
-                            'error': None,
-                            'progress': 0.0,
-                            'files': files_exist
-                        })
-                        save_process_state(str(STORAGE_DIR), space_id, state)
-                        st.rerun()
+        except Exception as e:
+            logger.error(f"Error displaying process state: {e}")
+            container.error("Error displaying process state")
 
     def sync_active_processes():
-        """Synchronize active processes in session state with actual process states."""
-        if not hasattr(st.session_state, 'active_processes'):
-            st.session_state.active_processes = []
-        
-        # Create new list of actually active processes
-        active_processes = []
-        state_dir = STORAGE_DIR / "state"
-        
-        if state_dir.exists():
+        """Sync active processes list with current state."""
+        try:
+            # Get all state files
+            state_dir = Path(STORAGE_DIR) / "state"
+            if not state_dir.exists():
+                return
+            
+            current_processes = []
             for state_file in state_dir.glob("*.json"):
                 try:
                     space_id = state_file.stem
                     state = get_process_state(str(STORAGE_DIR), space_id)
-                    original_url = get_url_from_history(space_id)
                     
-                    # Check if process is actually active
+                    # Get original URL
+                    url = get_url_from_history(space_id)
+                    
+                    # Check if process is active or needs attention
                     if state['status'] == 'processing':
-                        # Check Celery task status if we have a task ID
-                        task_active = False
-                        if 'task_id' in state:
-                            try:
-                                result = AsyncResult(state['task_id'], app=celery_app)
-                                if not result.ready():
-                                    # Get current task in chain
-                                    current_task = result.parent if result.parent else result
-                                    if current_task and current_task.state != 'PENDING':
-                                        task_active = True
-                                        # Update state with current task info
-                                        state['stage'] = current_task.name.split('.')[-1].replace('_task', '')
-                                        save_process_state(str(STORAGE_DIR), space_id, state)
-                            except Exception as e:
-                                logger.error(f"Error checking task status: {e}")
+                        # Check if process is stale
+                        last_updated = datetime.fromisoformat(state.get('last_updated', '2000-01-01'))
+                        time_since_update = datetime.now() - last_updated
                         
-                        # Check last update time
-                        last_updated_str = state.get('last_updated')
-                        if last_updated_str:
-                            last_updated = datetime.fromisoformat(last_updated_str)
-                            time_since_update = datetime.now() - last_updated
+                        if time_since_update <= timedelta(minutes=5):
+                            # Active process
+                            current_processes.append((space_id, state, url))
+                        else:
+                            # Stale process - mark as error
+                            state.update({
+                                'status': 'error',
+                                'error': 'Process became stale',
+                                'stage': None,
+                                'progress': 0.0
+                            })
+                            save_process_state(str(STORAGE_DIR), space_id, state)
                             
-                            # Only consider active if task is running or recently updated
-                            if task_active or time_since_update <= timedelta(minutes=5):
-                                active_processes.append((space_id, state, original_url))
-                            else:
-                                # Mark stale process as error
-                                logger.warning(f"Found stale process {space_id}, marking as error")
-                                state.update({
-                                    'status': 'error',
-                                    'error': 'Process state was stale or task was terminated',
-                                    'stage': None,
-                                    'progress': 0.0,
-                                    'last_updated': datetime.now().isoformat()
-                                })
-                                save_process_state(str(STORAGE_DIR), space_id, state)
-                
+                    elif state['status'] == 'error':
+                        # Keep error states visible for a while
+                        last_updated = datetime.fromisoformat(state.get('last_updated', '2000-01-01'))
+                        time_since_update = datetime.now() - last_updated
+                        
+                        if time_since_update <= timedelta(minutes=30):  # Show errors for 30 minutes
+                            current_processes.append((space_id, state, url))
+                            
                 except Exception as e:
-                    logger.error(f"Error checking state file {state_file}: {e}")
+                    logger.error(f"Error processing state file {state_file}: {e}")
                     continue
+                
+            # Update session state
+            st.session_state.active_processes = current_processes
+            
+        except Exception as e:
+            logger.error(f"Error in sync_active_processes: {e}")
         
-        # Update session state with actually active processes
-        st.session_state.active_processes = active_processes
+    # Add periodic state sync
+    if 'last_sync_time' not in st.session_state:
+        st.session_state.last_sync_time = None
+    
+    current_time = time.time()
+    if (st.session_state.last_sync_time is None or 
+        current_time - st.session_state.last_sync_time >= 5):  # Sync every 5 seconds
+        sync_active_processes()
+        st.session_state.last_sync_time = current_time
+
+    def get_space_id(url: str) -> str:
+        """Extract space ID from URL and create a hash for storage."""
+        # Clean the URL first
+        url = url.strip()
+        # Extract video ID for YouTube URLs
+        if 'youtube.com' in url or 'youtu.be' in url:
+            if 'v=' in url:
+                video_id = url.split('v=')[1].split('&')[0]
+            else:
+                video_id = url.split('/')[-1].split('?')[0]
+            return hashlib.md5(video_id.encode()).hexdigest()
+        # For other URLs, hash the entire URL
+        return hashlib.md5(url.encode()).hexdigest()
+
+    def get_storage_paths(storage_root: str, space_id: str) -> StoragePaths:
+        """Get paths for storing space data."""
+        # Ensure we're using the hashed space_id for storage
+        return {
+            'audio_path': str(DOWNLOADS_DIR / f"{space_id}.mp3"),
+            'transcript_path': str(TRANSCRIPTS_DIR / f"{space_id}.txt"),
+            'quotes_path': str(QUOTES_DIR / f"{space_id}.txt"),
+            'summary_path': str(SUMMARIES_DIR / f"{space_id}.json")
+        }
 
     def process_space_with_ui(url: str, _progress_container: Any) -> Optional[StoragePaths]:
         """Process media URL with Streamlit UI updates."""
         try:
             log_processing_step("Space processing", "started", f"URL: {url}")
             space_id = get_space_id(url)
-            
-            # Sync active processes first
-            sync_active_processes()
+            logger.info(f"Generated space_id: {space_id} for URL: {url}")
             
             # Get storage paths
             storage_paths = get_storage_paths(str(STORAGE_DIR), space_id)
             
-            # Check if all files already exist and are valid
-            if all(os.path.exists(str(p)) for p in storage_paths.values()):
-                st.success("✅ All files already exist for this URL!")
+            # Log all expected file paths
+            logger.info("Expected file paths:")
+            for key, path in storage_paths.items():
+                logger.info(f"{key}: {path} (exists: {Path(str(path)).exists()})")
+            
+            # Check each file's existence and validity
+            files_status = {
+                'audio': os.path.exists(storage_paths['audio_path']) and os.path.getsize(storage_paths['audio_path']) > 0,
+                'transcript': os.path.exists(storage_paths['transcript_path']) and os.path.getsize(storage_paths['transcript_path']) > 0,
+                'quotes': os.path.exists(storage_paths['quotes_path']) and os.path.getsize(storage_paths['quotes_path']) > 0,
+                'summary': os.path.exists(storage_paths['summary_path']) and os.path.getsize(storage_paths['summary_path']) > 0
+            }
+            
+            # Log file status
+            logger.info("File status:")
+            for file_type, exists in files_status.items():
+                logger.info(f"{file_type}: {exists}")
+            
+            # If all files exist, just load them
+            if all(files_status.values()):
+                logger.info("All files already exist, loading existing state")
+                st.session_state.loaded_space_id = space_id
                 st.session_state.processing_complete = True
                 return storage_paths
             
-            # Check current state
-            state = check_process_state(space_id)
-            is_active_process = any(space_id == p[0] for p in st.session_state.active_processes)
+            # Determine which stage to start from
+            start_stage = None
+            if not files_status['audio']:
+                start_stage = 'download'
+            elif not files_status['transcript']:
+                start_stage = 'transcribe'
+            elif not files_status['quotes']:
+                start_stage = 'quotes'
+            elif not files_status['summary']:
+                start_stage = 'summary'
             
-            # Handle different states
-            if state['status'] == 'processing':
-                if is_active_process:
-                    # Process is actually active and in sidebar
-                    display_process_state(state, _progress_container)
-                    st.info("⏳ This URL is already being processed. You can view its progress in the sidebar.")
-                    return None
-                else:
-                    # Process claims to be active but isn't in sidebar - validate state
-                    task_active = False
-                    if 'task_id' in state:
-                        try:
-                            result = AsyncResult(state['task_id'], app=celery_app)
-                            if not result.ready():
-                                # Get current task in chain
-                                current_task = result.parent if result.parent else result
-                                if current_task and current_task.state != 'PENDING':
-                                    task_active = True
-                                    # Update state with current task info
-                                    state['stage'] = current_task.name.split('.')[-1].replace('_task', '')
-                                    save_process_state(str(STORAGE_DIR), space_id, state)
-                        except Exception as e:
-                            logger.error(f"Error checking task status: {e}")
-                    
-                    if task_active:
-                        # Task is still running, add to active processes
-                        st.session_state.active_processes.append((space_id, state, url))
-                        display_process_state(state, _progress_container)
-                        st.info("⏳ This URL is already being processed. You can view its progress in the sidebar.")
-                        st.rerun()
-                    else:
-                        # Task is not active, reset state
-                        logger.warning(f"Process {space_id} has no active task, resetting...")
-                        state.update({
-                            'status': 'error',
-                            'error': 'Process was interrupted',
-                            'stage': None,
-                            'progress': 0.0,
-                            'last_updated': datetime.now().isoformat()
-                        })
-                        save_process_state(str(STORAGE_DIR), space_id, state)
+            # Start Celery task chain from appropriate stage
+            from celery_worker.tasks import (
+                download_media, transcribe_media,
+                generate_quotes_task, generate_summary_task
+            )
             
-            # Check for partial completion and cleanup failed files
-            files_exist = {
-                'audio': os.path.exists(storage_paths['audio_path']),
-                'transcript': os.path.exists(storage_paths['transcript_path']),
-                'quotes': os.path.exists(storage_paths['quotes_path']),
-                'summary': os.path.exists(storage_paths['summary_path'])
-            }
+            logger.info(f"Starting task chain from stage: {start_stage}")
             
-            # If previous attempt failed, clean up partial files
-            if state['status'] == 'error':
-                logger.info(f"Cleaning up failed process state for {space_id}")
-                # Clean up partial downloads or corrupted files
-                if files_exist['audio'] and state.get('stage') == 'download':
-                    logger.info("Removing partial audio file")
-                    try:
-                        os.remove(storage_paths['audio_path'])
-                        files_exist['audio'] = False
-                    except Exception as e:
-                        logger.error(f"Error removing audio file: {e}")
+            # Build task chain based on starting stage
+            tasks = []
+            if start_stage == 'download':
+                tasks.append(download_media.si(url, str(STORAGE_DIR)))
+                tasks.extend([
+                    transcribe_media.s(),
+                    generate_quotes_task.s(),
+                    generate_summary_task.s()
+                ])
+            elif start_stage == 'transcribe':
+                tasks.extend([
+                    transcribe_media.si({'space_id': space_id, 'storage_dir': str(STORAGE_DIR), 'audio_path': str(storage_paths['audio_path'])}),
+                    generate_quotes_task.s(),
+                    generate_summary_task.s()
+                ])
+            elif start_stage == 'quotes':
+                tasks.extend([
+                    generate_quotes_task.si({'space_id': space_id, 'storage_dir': str(STORAGE_DIR), 'transcript_path': str(storage_paths['transcript_path'])}),
+                    generate_summary_task.s()
+                ])
+            elif start_stage == 'summary':
+                tasks.append(
+                    generate_summary_task.si({'space_id': space_id, 'storage_dir': str(STORAGE_DIR), 'quotes_path': str(storage_paths['quotes_path'])})
+                )
+            
+            if tasks:
+                logger.info("Applying task chain asynchronously...")
+                result = chain(*tasks).apply_async()
+                logger.info(f"Task chain started with ID: {result.id}")
                 
-                # Remove other incomplete files based on stage
-                if state.get('stage') in ['transcribe', 'quotes', 'summary']:
-                    for file_type, exists in files_exist.items():
-                        if exists and file_type != 'audio':  # Keep audio if it was fully downloaded
-                            try:
-                                os.remove(storage_paths[f'{file_type}_path'])
-                                files_exist[file_type] = False
-                            except Exception as e:
-                                logger.error(f"Error removing {file_type} file: {e}")
-            
-            # Reset state to start/resume processing
-            state.update({
-                'status': 'processing',
-                'stage': None,
-                'error': None,
-                'progress': 0.0,
-                'files': files_exist,
-                'last_updated': datetime.now().isoformat()
-            })
-            save_process_state(str(STORAGE_DIR), space_id, state)
-            
-            # Start Celery task chain
-            from celery_worker.tasks import process_space_chain
-            chain = process_space_chain(url, str(STORAGE_DIR))
-            result = chain.apply_async()
-            
-            # Store task ID in session state and process state
-            st.session_state.current_task_id = result.id
-            st.session_state.current_space_id = space_id
-            state['task_id'] = result.id
-            save_process_state(str(STORAGE_DIR), space_id, state)
-            
-            # Add to active processes and ensure it's shown in sidebar
-            if space_id not in [p[0] for p in st.session_state.active_processes]:
-                st.session_state.active_processes.append((space_id, state, url))
-                st.rerun()  # Rerun to update sidebar immediately
-            
-            # Return paths for UI updates
-            return storage_paths
+                # Store task ID in session state
+                st.session_state.current_task_id = result.id
+                
+                # Initialize or update process state
+                state = get_process_state(str(STORAGE_DIR), space_id)
+                state.update({
+                    'status': 'processing',
+                    'stage': start_stage,
+                    'progress': 0.0,
+                    'files': files_status,
+                    'task_id': result.id,
+                    'last_updated': datetime.now().isoformat()
+                })
+                save_process_state(str(STORAGE_DIR), space_id, state)
+                
+                # Add to active processes if not already there
+                if space_id not in [p[0] for p in st.session_state.active_processes]:
+                    st.session_state.active_processes.append((space_id, state, url))
+                
+                return storage_paths
+            else:
+                logger.info("No processing needed, all files exist")
+                return storage_paths
             
         except Exception as e:
-            logger.error(f"Error starting process: {str(e)}")
-            st.error(f"Error: {str(e)}")
-            # Clean up session state
-            if 'current_task_id' in st.session_state:
-                st.session_state.current_task_id = None
+            logger.error(f"Error in process_space_with_ui: {str(e)}")
+            st.error(f"Processing failed: {str(e)}")
             return None
 
     def download_with_progress(url: str, output_dir: str, progress_bar: Any) -> Optional[str]:
         """Download media with progress tracking."""
         space_id = get_space_id(url)
         # Create a lock file path
-        lock_file = os.path.join(output_dir, f"{space_id}.lock")
+        lock_file = Path(output_dir) / f"{space_id}.lock"
         
         try:
             # Try to acquire a lock for this download
             with ProcessLock(str(STORAGE_DIR), space_id, timeout=3600):
                 # First check if MP3 already exists
-                final_mp3 = os.path.join(output_dir, f"{space_id}.mp3")
-                if os.path.exists(final_mp3):
+                final_mp3 = Path(output_dir) / f"{space_id}.mp3"
+                if final_mp3.exists() and final_mp3.stat().st_size > 0:
                     logger.info(f"MP3 file already exists: {final_mp3}")
                     progress_bar.progress(1.0, "File already exists")
-                    return final_mp3
+                    return str(final_mp3)
                 
                 # First download without post-processing
                 download_opts = {
                     'format': 'bestaudio/best',
-                    'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
+                    'outtmpl': str(Path(output_dir) / f"{space_id}.%(ext)s"),
                     'progress_hooks': [lambda d: progress_bar.progress(d['downloaded_bytes'] / d['total_bytes'] if d['total_bytes'] else 0)],
                     'keepvideo': True,  # Keep the original file
                     'postprocessors': [],  # No post-processing yet
@@ -898,7 +719,7 @@ if check_password():
                 try:
                     with yt_dlp.YoutubeDL(download_opts) as ydl:
                         info = ydl.extract_info(url, download=True)
-                        original_file = os.path.join(output_dir, f"{info['id']}.{info['ext']}")
+                        original_file = str(Path(output_dir) / f"{info['id']}.{info['ext']}")
                         
                         # Convert to MP3 if needed
                         if info['ext'] != 'mp3':
@@ -913,7 +734,7 @@ if check_password():
                                 os.remove(original_file)
                                 
                                 progress_bar.progress(1.0, "Download complete")
-                                return final_mp3
+                                return str(final_mp3)
                             else:
                                 logger.warning("ffmpeg not found - keeping original format")
                                 progress_bar.progress(1.0, "Download complete (original format)")
@@ -935,20 +756,6 @@ if check_password():
             logger.error(f"Download error: {str(e)}")
             st.error(f"Download error: {str(e)}")
             return None
-
-    def get_space_id(url: str) -> str:
-        """Extract space ID from URL and create a hash for storage."""
-        space_id = url.strip('/').split('/')[-1]
-        return hashlib.md5(space_id.encode()).hexdigest()
-
-    def get_storage_paths(storage_root: str, space_id: str) -> StoragePaths:
-        """Get paths for storing space data."""
-        return {
-            'audio_path': str(DOWNLOADS_DIR / f"{space_id}.mp3"),
-            'transcript_path': str(TRANSCRIPTS_DIR / f"{space_id}.txt"),
-            'quotes_path': str(QUOTES_DIR / f"{space_id}.txt"),
-            'summary_path': str(SUMMARIES_DIR / f"{space_id}.json")
-        }
 
     def find_processing_spaces() -> List[Tuple[str, ProcessState, str]]:
         """Find all spaces currently being processed."""
@@ -1068,8 +875,8 @@ if check_password():
             current_task = result.parent if result.parent else result
             return {
                 'status': 'processing',
-                'state': current_task.state,
-                'task_id': current_task.id
+                'state': current_task.state if current_task else 'PENDING',
+                'task_id': current_task.id if current_task else task_id
             }
 
     # Main app
@@ -1133,7 +940,7 @@ if check_password():
     with main_tab:
         # Add dropdown for previous media
         if DOWNLOADS_DIR.exists():
-            media_files = list(DOWNLOADS_DIR.glob("*.mp3"))
+            media_files: List[Path] = list(DOWNLOADS_DIR.glob("*.mp3"))
             if media_files:
                 # Load URL history at the start
                 url_history = load_url_history()
@@ -1144,12 +951,13 @@ if check_password():
                 with col1:
                     # Create options list with better formatting
                     options = ["🆕 New URL"]
-                    media_info = {}  # Store full info for each media
+                    media_info: Dict[str, Dict[str, Union[str, float]]] = {}  # Store full info for each media
                     
-                    for f in media_files:
-                        space_id = Path(f).stem
+                    media_files_list: List[Path] = media_files
+                    for media_path in media_files_list:
+                        space_id = media_path.stem
                         url = url_history.get(space_id, "Unknown URL")
-                        size_mb = f.stat().st_size / (1024 * 1024)
+                        size_mb = media_path.stat().st_size / (1024 * 1024)
                         
                         # Create a display name that shows the URL clearly
                         if url != "Unknown URL":
@@ -1193,11 +1001,17 @@ if check_password():
         # Add URL input field - show for both new URL and selected URL
         url_value = ""
         if selected_option and selected_option != "🆕 New URL":
-            url_value = media_info[selected_option]['url']
-        url = st.text_input("Paste Media URL:", value=url_value, key="url_input")
+            url_value = str(media_info[selected_option]['url'])
         
-        # Process button
-        if url and st.button("🚀 Process", key="process_button"):
+        # Create columns for URL input and process button
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            url = st.text_input("Paste Media URL:", value=url_value, key="url_input")
+        with col2:
+            process_button = st.button("🚀 Process", key="process_button", use_container_width=True)
+        
+        # Process button handler
+        if url and process_button:
             # Create progress container
             progress_container = st.container()
             
@@ -1429,7 +1243,7 @@ if check_password():
                         with st.spinner("Generating summary..."):
                             summary = generate_summary(transcript, quotes, storage_paths['summary_path'])
                             
-                            if summary['overview'] != "Error generating summary":
+                            if isinstance(summary, dict) and summary.get('overview') != "Error generating summary":
                                 # Save the summary
                                 save_summary(summary, storage_paths['summary_path'])
                                 st.success("✨ Summary generated successfully!")
@@ -1493,15 +1307,15 @@ if check_password():
         
         # List all downloaded media
         if DOWNLOADS_DIR.exists():
-            media_files = list(DOWNLOADS_DIR.glob("*.mp3"))
-            if media_files:
+            history_media_files: List[Path] = list(DOWNLOADS_DIR.glob("*.mp3"))
+            if history_media_files:
                 # Add search/filter box
                 search = st.text_input("🔍 Search media files", 
                                      help="Filter by URL or ID")
                 
                 # Create a radio selection for media files
                 media_options = {}
-                for media_file in media_files:
+                for media_file in history_media_files:
                     space_id = media_file.stem
                     original_url = get_url_from_history(space_id)
                     size_mb = media_file.stat().st_size / (1024 * 1024)
