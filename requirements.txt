@@ -18,3 +18,15 @@ streamlit-extras>=0.3.6  # Additional Streamlit components
 # --- Celery background job runner dependencies ---
 celery>=5.3
 redis>=4.5
+
+# --- Testing dependencies ---
+pytest>=8.0.0  # Testing framework
+pytest-asyncio>=0.23.5  # Async test support
+pytest-cov>=4.1.0  # Coverage reporting
+pytest-mock>=3.12.0  # Mocking support
+
+# --- Type checking and stubs ---
+mypy>=1.8.0
+types-requests>=2.31.0
+types-redis>=4.6.0
+types-emoji>=2.1.0.3  # Latest available version

@@ -1,0 +1,116 @@
+---
+description: Process State Management Best Practices
+globs: **/*.py
+alwaysApply: false
+---
+
+# Process State Management Best Practices
+
+## Context
+- When managing long-running processes with state files
+- When handling application lifecycle events (startup, shutdown, crashes)
+- When dealing with distributed processing and state tracking
+
+## Requirements
+- ALWAYS clean up stale process states on application startup
+- ALWAYS update process states on application shutdown
+- ALWAYS include timestamps in state updates
+- ALWAYS handle interrupted processes gracefully
+- ALWAYS validate state file integrity
+- ALWAYS use atomic state file operations
+- ALWAYS implement proper locking mechanisms
+
+## Examples
+
+<example>
+# Good: Proper state cleanup on startup
+def cleanup_stale_states():
+    """Clean up stale process states on startup."""
+    state_dir = Path(STORAGE_DIR) / "state"
+    if not state_dir.exists():
+        return
+
+    try:
+        for state_file in state_dir.glob("*.json"):
+            try:
+                with open(state_file, 'r') as f:
+                    state = json.load(f)
+                
+                # Mark interrupted processes as errored
+                if state.get('status') == 'processing':
+                    state.update({
+                        'status': 'error',
+                        'error': 'Process was interrupted by system shutdown',
+                        'stage': None,
+                        'progress': 0.0,
+                        'last_updated': datetime.now().isoformat()
+                    })
+                    with open(state_file, 'w') as f:
+                        json.dump(state, f)
+            except Exception as e:
+                logger.error(f"Error cleaning up state file {state_file}: {e}")
+    except Exception as e:
+        logger.error(f"Error during state cleanup: {e}")
+</example>
+
+<example>
+# Good: Proper state update on shutdown
+def cleanup_on_shutdown():
+    """Update process states on application shutdown."""
+    try:
+        state_dir = Path(STORAGE_DIR) / "state"
+        for state_file in state_dir.glob("*.json"):
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+            if state.get('status') == 'processing':
+                state.update({
+                    'status': 'error',
+                    'error': 'Process interrupted by application shutdown',
+                    'last_updated': datetime.now().isoformat()
+                })
+                with open(state_file, 'w') as f:
+                    json.dump(state, f)
+    except Exception as e:
+        logger.error(f"Error during shutdown cleanup: {e}")
+</example>
+
+<example type="invalid">
+# Bad: No state cleanup on startup
+def main():
+    # Start application without cleaning stale states
+    app.run()
+</example>
+
+<example>
+# Good: Atomic state file operations with locking
+def update_process_state(space_id: str, new_state: Dict[str, Any]):
+    """Update process state atomically."""
+    state_file = Path(STORAGE_DIR) / "state" / f"{space_id}.json"
+    lock_file = state_file.with_suffix('.lock')
+    
+    with FileLock(str(lock_file)):
+        # Write to temporary file first
+        temp_file = state_file.with_suffix('.tmp')
+        with open(temp_file, 'w') as f:
+            json.dump(new_state, f)
+        # Atomic rename
+        temp_file.replace(state_file)
+</example>
+
+<example type="invalid">
+# Bad: Non-atomic state update
+def update_process_state(space_id: str, new_state: Dict[str, Any]):
+    """Update process state directly (unsafe)."""
+    state_file = Path(STORAGE_DIR) / "state" / f"{space_id}.json"
+    with open(state_file, 'w') as f:
+        json.dump(new_state, f)  # Direct write without locking
+</example>
+
+## Technical Notes
+- Use file locks to prevent concurrent state modifications
+- Implement atomic file operations to prevent state corruption
+- Include timestamps in all state updates for staleness detection
+- Clean up stale states on application startup
+- Mark interrupted processes as errored on shutdown
+- Log all state transitions for debugging
+- Validate state file integrity before reading/writing 

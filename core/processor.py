@@ -9,6 +9,7 @@ import subprocess
 import sys
 import io
 import hashlib
+import socket
 from contextlib import redirect_stdout, redirect_stderr
 from typing import Dict, Optional, Protocol, Any, Callable, List, TypedDict, Union
 from pathlib import Path
@@ -19,6 +20,8 @@ from core.quotes import create_quote_thread, chunk_transcript
 from core.summary import generate_summary
 from utils.file_utils import clean_filename
 from .types import ProcessState, StoragePaths
+from core.types import create_process_state
+from core.hostname import HOSTNAME, get_namespaced_key, strip_hostname_prefix
 
 try:
     import yt_dlp  # type: ignore
@@ -27,6 +30,9 @@ except ImportError:
 
 # Configure module logger
 logger = logging.getLogger(__name__)
+
+# Get hostname for namespacing
+HOSTNAME = socket.gethostname()
 
 def check_ffmpeg() -> bool:
     """Check if ffmpeg is available in the system."""
@@ -53,9 +59,9 @@ def get_cached_download(url: str, storage_root: str) -> Optional[str]:
     cache_dir = get_download_cache_path(storage_root)
     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    # Use URL hash as cache key
+    # Use URL hash as cache key with hostname namespace
     url_hash = get_space_id(url)
-    cache_file = cache_dir / f"{url_hash}.json"
+    cache_file = cache_dir / f"{HOSTNAME}:{url_hash}.json"
     
     if cache_file.exists():
         try:
@@ -80,12 +86,13 @@ def save_to_download_cache(url: str, file_path: str, storage_root: str):
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     url_hash = get_space_id(url)
-    cache_file = cache_dir / f"{url_hash}.json"
+    cache_file = cache_dir / f"{HOSTNAME}:{url_hash}.json"
     
     cache_data = {
         'url': url,
         'file_path': file_path,
-        'download_time': datetime.now().isoformat()
+        'download_time': datetime.now().isoformat(),
+        'hostname': HOSTNAME
     }
     
     with open(cache_file, 'w') as f:
@@ -96,219 +103,108 @@ class ProgressCallback(Protocol):
     def __call__(self, stage: str, progress: float, status: str) -> None: ...
 
 class ProcessLock:
-    """Context manager for process locking using file locks."""
-    def __init__(self, storage_root: str, space_id: str, timeout: int = 3600, retry_delay: float = 1.0, max_retries: int = 3):
-        self.storage_root = storage_root
-        self.space_id = space_id
-        self.lock_dir = Path(storage_root) / "locks"
-        self.lock_dir.mkdir(parents=True, exist_ok=True)
-        self.lock_path = self.lock_dir / f"{space_id}.lock"
+    """File-based process lock."""
+    
+    def __init__(self, space_id: str, lock_dir: Path):
+        self.lock_dir = lock_dir
+        self.lock_path = self.lock_dir / get_namespaced_key('lock', space_id)
         self.lock_file = None
-        self.timeout = timeout
-        self.retry_delay = retry_delay
-        self.max_retries = max_retries
         
     def __enter__(self):
-        try:
-            # Create lock file if it doesn't exist
-            self.lock_file = open(self.lock_path, 'a+')
-            
-            # Try to acquire lock
-            start_time = time.time()
-            retries = 0
-            
-            while retries < self.max_retries:
-                try:
-                    fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    # Write current timestamp
-                    self.lock_file.seek(0)
-                    self.lock_file.write(str(time.time()))
-                    self.lock_file.flush()
-                    return self
-                except IOError:
-                    # Check if we've exceeded timeout
-                    if time.time() - start_time > self.timeout:
-                        raise TimeoutError("Failed to acquire lock: timeout exceeded")
-                    
-                    # Check process state before breaking lock
-                    state = get_process_state(self.storage_root, self.space_id)
-                    if state['status'] == 'processing':
-                        # If process is still active according to state, don't break lock
-                        last_updated = datetime.fromisoformat(state['last_updated']) if state.get('last_updated') else None
-                        if last_updated and (datetime.now() - last_updated) <= timedelta(hours=1):
-                            logger.info("Process is still active, waiting for lock...")
-                            time.sleep(self.retry_delay)
-                            continue
-                    
-                    # If process state is not active or is stale, try to break lock
-                    if self._is_lock_stale():
-                        logger.warning("Found stale lock, attempting to break it")
-                        self._break_stale_lock()
-                        retries += 1
-                        if retries >= self.max_retries:
-                            raise TimeoutError("Failed to acquire lock after breaking stale lock")
-                    
-                    # Sleep before retry
-                    time.sleep(self.retry_delay)
-            
-            raise TimeoutError("Failed to acquire lock: max retries exceeded")
-            
-        except Exception as e:
-            if self.lock_file:
-                try:
-                    self.lock_file.close()
-                except Exception:
-                    pass
-            raise e
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Acquire the lock."""
+        self.lock_dir.mkdir(parents=True, exist_ok=True)
+        self.lock_file = open(self.lock_path, 'w')
+        fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX)
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Release the lock."""
         if self.lock_file:
-            try:
-                fcntl.flock(self.lock_file, fcntl.LOCK_UN)
-                self.lock_file.close()
-                if os.path.exists(self.lock_path):
-                    os.remove(self.lock_path)
-            except Exception as e:
-                logger.error(f"Error cleaning up lock file: {e}")
-
-    def _is_lock_stale(self) -> bool:
-        """Check if the existing lock is stale (older than timeout)."""
-        try:
-            if not os.path.exists(self.lock_path):
-                return True
-            with open(self.lock_path, 'r') as f:
-                content = f.read().strip()
-                if not content:
-                    return True
-                timestamp = float(content)
-                return time.time() - timestamp > self.timeout
-        except (IOError, ValueError):
-            return True
-
-    def _break_stale_lock(self) -> None:
-        """Break a stale lock by removing the lock file."""
-        try:
-            if os.path.exists(self.lock_path):
-                os.remove(self.lock_path)
-        except OSError as e:
-            logger.error(f"Error breaking stale lock: {e}")
+            fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
+            self.lock_file.close()
 
 def get_space_id(url: str) -> str:
     """Get unique ID for a space URL."""
+    # Return raw hash without hostname - namespacing handled by callers
     return hashlib.md5(url.encode()).hexdigest()
 
-def get_storage_paths(storage_root: str, space_id: str) -> StoragePaths:
-    """Get paths for storing space data.
-    
-    Args:
-        storage_root: Root directory for storage
-        space_id: Unique identifier for the space
-        
-    Returns:
-        Dictionary of paths for different file types
-    """
-    storage_dir = Path(storage_root)
-    downloads_dir = storage_dir / "downloads"
-    transcripts_dir = storage_dir / "transcripts"
-    quotes_dir = storage_dir / "quotes"
-    summaries_dir = storage_dir / "summaries"
-    
-    # Ensure directories exist
-    for dir_path in [downloads_dir, transcripts_dir, quotes_dir, summaries_dir]:
-        dir_path.mkdir(parents=True, exist_ok=True)
-    
-    return {
-        'audio_path': str(downloads_dir / f"{space_id}.mp3"),
-        'transcript_path': str(transcripts_dir / f"{space_id}.txt"),
-        'quotes_path': str(quotes_dir / f"{space_id}.txt"),
-        'summary_path': str(summaries_dir / f"{space_id}.json")
-    }
+def get_url_hash(url: str) -> str:
+    """Get a hash of the URL for caching."""
+    return hashlib.md5(url.encode()).hexdigest()
 
-def get_process_state(storage_root: str, space_id: str) -> ProcessState:
-    """Get the current processing state for a space."""
-    state_path = Path(storage_root) / "state" / f"{space_id}.json"
+def get_cached_metadata(url: str, cache_dir: Path) -> Optional[Dict[str, Any]]:
+    """Get cached metadata for a URL if it exists."""
+    url_hash = get_url_hash(url)
+    cache_file = cache_dir / get_namespaced_key('cache', url_hash)
     
-    # Get current state from file
-    current_state: ProcessState = {
-        'status': 'not_started',
-        'stage': None,
-        'progress': 0.0,
-        'last_updated': None,
-        'error': None,
-        'files': {},
-        'current_chunk': None,
-        'total_chunks': None,
-        'completed_chunks': [],
-        'console_output': None
-    }
-    
-    if state_path.exists():
+    if cache_file.exists():
         try:
-            with open(state_path, 'r') as f:
-                loaded_state = json.load(f)
-                # Type-safe update of current state
-                if isinstance(loaded_state, dict):
-                    for key in current_state.keys():
-                        if key in loaded_state:
-                            current_state[key] = loaded_state[key]  # type: ignore
-        except json.JSONDecodeError:
-            pass
+            with open(cache_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading cache file: {e}")
+    return None
 
-    # Get expected file paths
-    paths = get_storage_paths(storage_root, space_id)
+def save_cached_metadata(url: str, metadata: Dict[str, Any], cache_dir: Path) -> None:
+    """Save metadata to cache."""
+    url_hash = get_url_hash(url)
+    cache_file = cache_dir / get_namespaced_key('cache', url_hash)
     
-    # Check which files actually exist
-    files_status = {
-        'audio': os.path.exists(paths['audio_path']),
-        'transcript': os.path.exists(paths['transcript_path']),
-        'quotes': os.path.exists(paths['quotes_path']),
-        'summary': os.path.exists(paths['summary_path'])
-    }
-    current_state['files'] = files_status
-    
-    # If state shows complete/processing but files are missing, update state
-    if current_state['status'] in ['complete', 'processing']:
-        expected_files: Dict[str, List[str]] = {
-            'download': ['audio'],
-            'transcribe': ['audio', 'transcript'],
-            'quotes': ['audio', 'transcript', 'quotes'],
-            'summary': ['audio', 'transcript', 'quotes', 'summary']
-        }
-        
-        current_stage = current_state['stage']
-        if current_stage and current_stage in expected_files:
-            missing_files = [
-                f for f in expected_files[current_stage]
-                if not files_status.get(f, False)
-            ]
-            
-            if missing_files:
-                logger.warning(f"Process state indicates {current_stage} but missing files: {missing_files}")
-                current_state.update({
-                    'status': 'error',
-                    'error': f'Missing required files: {", ".join(missing_files)}',
-                    'progress': 0.0
-                })
-                save_process_state(storage_root, space_id, current_state)
-    
-    return current_state
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(cache_file, 'w') as f:
+            json.dump(metadata, f)
+    except Exception as e:
+        logger.error(f"Error saving cache file: {e}")
 
-def save_process_state(storage_root: str, space_id: str, state: ProcessState) -> None:
-    """Save the current processing state.
+def get_storage_paths(storage_root: str, space_id: str) -> StoragePaths:
+    """Get storage paths for a space."""
+    # Strip hostname from space_id if present for backwards compatibility
+    base_id = strip_hostname_prefix(space_id)
     
-    Args:
-        storage_root: Root directory for storage
-        space_id: Unique identifier for the space
-        state: State dictionary to save
-    """
-    state_dir = Path(storage_root) / "state"
-    state_dir.mkdir(exist_ok=True)
-    state_path = state_dir / f"{space_id}.json"
+    return StoragePaths(
+        audio_path=f"{storage_root}/downloads/{base_id}.mp3",
+        transcript_path=f"{storage_root}/transcripts/{base_id}.txt",
+        quotes_path=f"{storage_root}/quotes/{base_id}.txt",
+        summary_path=f"{storage_root}/summaries/{base_id}.json"
+    )
+
+def get_process_state(storage_dir: str, space_id: str) -> ProcessState:
+    """Get current process state."""
+    state_dir = Path(storage_dir) / 'state'
+    state_file = state_dir / f"{space_id}.json"
     
-    # Update last_updated timestamp
-    state['last_updated'] = datetime.now().isoformat()
+    if state_file.exists():
+        try:
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+                # Add hostname if not present
+                if 'hostname' not in state:
+                    state['hostname'] = HOSTNAME
+                return state
+        except Exception as e:
+            logger.error(f"Error reading state file: {e}")
     
-    with open(state_path, 'w') as f:
+    # Return default state
+    return create_process_state(
+        stage='init',
+        progress=0.0,
+        status='processing',
+        stage_status='Initializing...',
+        hostname=HOSTNAME
+    )
+
+def save_process_state(storage_dir: str, space_id: str, state: ProcessState) -> None:
+    """Save process state."""
+    state_dir = Path(storage_dir) / 'state'
+    state_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Ensure hostname is set
+    if 'hostname' not in state:
+        state['hostname'] = HOSTNAME
+    
+    state_file = state_dir / f"{space_id}.json"
+    with open(state_file, 'w') as f:
         json.dump(state, f)
 
 def update_state_with_output(state: ProcessState, stage: str, progress: float, status: str, output: str):
@@ -365,7 +261,7 @@ def process_space(
             save_process_state(storage_root, space_id, state)
         
         # Acquire process lock
-        with ProcessLock(storage_root, space_id) as lock:
+        with ProcessLock(space_id, Path(storage_root) / "locks") as lock:
             # Check if all files already exist
             if all(os.path.exists(str(p)) for p in paths.values()):
                 logger.info("All files already exist")
@@ -412,21 +308,32 @@ def process_space(
                     output_buffer = io.StringIO()
                     with redirect_stdout(output_buffer), redirect_stderr(output_buffer):
                         def download_progress_hook(d: Dict[str, Any]):
+                            """Progress hook for yt-dlp downloads."""
+                            nonlocal state
+                            
                             if d['status'] == 'downloading':
-                                total_bytes = d.get('total_bytes')
-                                downloaded_bytes = d.get('downloaded_bytes', 0)
-                                if total_bytes:
-                                    progress = downloaded_bytes / total_bytes
-                                speed = d.get('speed', 0)
-                                if speed:
-                                    speed_mb = speed / (1024 * 1024)
-                                    status = f"Downloading media: {progress*100:.1f}% ({speed_mb:.1f} MB/s)"
-                                else:
-                                    status = f"Downloading media: {progress*100:.1f}%"
-                                # Update with captured output
-                                update_progress("download", progress * 0.8, status, output_buffer.getvalue())
+                                try:
+                                    downloaded = d.get('downloaded_bytes', 0)
+                                    total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                                    
+                                    if total > 0:
+                                        progress = downloaded / total
+                                        speed = d.get('speed', 0)
+                                        speed_mb = speed / (1024 * 1024) if speed else 0
+                                        eta = d.get('eta', 0)
+                                        
+                                        status = f"Downloading: {progress*100:.1f}% ({speed_mb:.1f} MB/s, ETA: {eta}s)"
+                                        update_progress('download', progress * 0.8, status)
+                                        
+                                        # Force state save for YouTube downloads
+                                        save_process_state(storage_root, space_id, state)
+                                        
+                                except Exception as e:
+                                    logger.error(f"Error in download progress hook: {e}")
+                            
                             elif d['status'] == 'finished':
-                                update_progress("download", 0.8, "Download complete, extracting audio...", output_buffer.getvalue())
+                                update_progress('download', 0.9, "Download complete, processing file...")
+                                save_process_state(storage_root, space_id, state)
                         
                         # Configure download options with progress tracking
                         download_opts = {

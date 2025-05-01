@@ -1,8 +1,9 @@
 ---
 description: ALWAYS follow task chain best practices when implementing Celery tasks to ensure proper state management and error handling
 globs: **/*.py
----
 alwaysApply: false
+---
+
 # Celery Task Chain Best Practices
 
 ## Context

@@ -200,3 +200,45 @@ The application tracks task progress and status in the `storage/state/` director
 - API keys are stored securely in `secrets.toml`
 - Sensitive files are gitignored
 - All user uploads are validated and sanitized
+
+## Redis Configuration
+
+The application uses Redis for both Celery task management and application state storage. Configure Redis connection using environment variables:
+
+1. Create a `.env` file in the project root:
+```bash
+# Redis configuration (used by both Celery and Redis manager)
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+```
+
+2. Optional: If Redis requires authentication, use password in the URL:
+```bash
+CELERY_BROKER_URL=redis://:password@localhost:6379/0
+CELERY_RESULT_BACKEND=redis://:password@localhost:6379/0
+```
+
+3. For different environments, use different Redis databases (0-15):
+```bash
+# Development
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+
+# Testing
+CELERY_BROKER_URL=redis://localhost:6379/1
+CELERY_RESULT_BACKEND=redis://localhost:6379/1
+
+# Production
+CELERY_BROKER_URL=redis://localhost:6379/2
+CELERY_RESULT_BACKEND=redis://localhost:6379/2
+```
+
+4. For testing, you can use a temporary Redis instance:
+```bash
+# Start Redis in a Docker container
+docker run --name redis-test -p 6379:6379 -d redis
+
+# Stop and remove the container when done
+docker stop redis-test
+docker rm redis-test
+```

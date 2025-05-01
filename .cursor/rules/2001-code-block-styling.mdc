@@ -1,8 +1,9 @@
 ---
 description: ALWAYS use proper code block styling in Streamlit to ensure text wrapping and consistent display
 globs: **/*.py
----
 alwaysApply: false
+---
+
 # Streamlit Code Block Styling
 
 ## Context

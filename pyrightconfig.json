@@ -1,0 +1,30 @@
+{
+    "include": [
+        "app",
+        "core",
+        "celery_worker",
+        "tests",
+        "utils"
+    ],
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        ".venv",
+        ".git"
+    ],
+    "typeCheckingMode": "basic",
+    "reportMissingImports": true,
+    "reportUnknownMemberType": false,
+    "reportUnknownVariableType": false,
+    "reportUnknownArgumentType": false,
+    "reportOptionalSubscript": false,
+    "reportOptionalMemberAccess": false,
+    "reportOptionalCall": false,
+    "reportGeneralTypeIssues": false,
+    "reportUndefinedVariable": true,
+    "reportAttributeAccessIssue": false,
+    "reportReturnType": false,
+    "reportImportCycles": true,
+    "reportPrivateUsage": false,
+    "useLibraryCodeForTypes": true
+} 

@@ -1,6 +1,7 @@
 """Core functionality for transcribing audio files."""
 import os
 import logging
+import argparse
 from typing import Optional, Dict, Any
 import whisper  # type: ignore
 import torch

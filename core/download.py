@@ -1,8 +1,8 @@
 from typing import Optional, Callable, Dict, Any, List
 try:
-    import yt_dlp  # type: ignore
+    import yt_dlp
 except ImportError:
-    yt_dlp = None  # type: ignore
+    yt_dlp = None
 import os
 
 def download_twitter_space(url: str, output_path: str, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> str:
@@ -17,17 +17,20 @@ def download_twitter_space(url: str, output_path: str, progress_callback: Option
     Returns:
         Path to the downloaded audio file
     """
+    # First check if the MP3 already exists and is valid
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        if progress_callback:
+            progress_callback({
+                'status': 'finished',
+                'filename': output_path,
+                'downloaded_bytes': os.path.getsize(output_path),
+                'total_bytes': os.path.getsize(output_path)
+            })
+        return output_path
+    
     # Ensure the output directory exists
     output_dir = os.path.dirname(output_path)
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Remove any existing file or directory at output_path
-    if os.path.exists(output_path):
-        if os.path.isdir(output_path):
-            import shutil
-            shutil.rmtree(output_path)
-        else:
-            os.remove(output_path)
     
     # Remove .mp3 extension from output_path for yt-dlp since it will be added by postprocessor
     base_output_path = output_path[:-4] if output_path.endswith('.mp3') else output_path

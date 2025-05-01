@@ -1,6 +1,7 @@
 ---
 description: ALWAYS follow Celery task best practices when implementing Celery tasks to avoid common pitfalls and ensure proper task registration
 globs: **/*.py
+alwaysApply: false
 ---
 # 002-celery-tasks: Celery Integration Best Practices
 

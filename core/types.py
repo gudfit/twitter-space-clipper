@@ -18,6 +18,8 @@ class ProcessState(TypedDict):
     console_output: Optional[str]  # Captured console output for current stage
     # Task tracking
     task_id: Optional[str]  # Celery task ID for tracking
+    # Host tracking
+    hostname: Optional[str]  # Hostname for distributed processing
 
 def create_process_state(
     stage: str,
@@ -27,7 +29,8 @@ def create_process_state(
     error: Optional[str] = None,
     files: Optional[Dict[str, bool]] = None,
     console_output: Optional[str] = None,
-    task_id: Optional[str] = None
+    task_id: Optional[str] = None,
+    hostname: Optional[str] = None
 ) -> ProcessState:
     """Create a properly initialized ProcessState dictionary.
     
@@ -40,6 +43,7 @@ def create_process_state(
         files: Dictionary of file statuses
         console_output: Console output text
         task_id: Celery task ID
+        hostname: Hostname for distributed processing
         
     Returns:
         Properly initialized ProcessState dictionary
@@ -56,7 +60,8 @@ def create_process_state(
         'total_chunks': None,
         'completed_chunks': [],
         'console_output': console_output or '',
-        'task_id': task_id
+        'task_id': task_id,
+        'hostname': hostname
     }
 
 class StoragePaths(TypedDict):

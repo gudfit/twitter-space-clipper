@@ -46,6 +46,36 @@
   - [ ] Search by URL or content
   - [ ] Sort by date/size
 
+### State Management
+- [ ] Implement enhanced polling with state machine
+  - [ ] Define and implement state machine transitions
+  - [ ] Create Redis schema for state storage
+  - [ ] Add state validation and consistency checks
+  - [ ] Implement optimized polling mechanism
+  - [ ] Add error state handling and recovery
+- [ ] Improve state transition handling
+  - [ ] Add proper locking mechanisms
+  - [ ] Handle race conditions
+  - [ ] Implement state transition logging
+  - [ ] Add state transition validation
+- [ ] Enhance frontend state updates
+  - [ ] Implement efficient polling strategy
+  - [ ] Add proper error state display
+  - [ ] Improve loading states
+  - [ ] Add state transition animations
+
+### Authentication
+- [ ] Implement session-based authentication
+  - [ ] Remove file-based auth (.auth_status)
+  - [ ] Set up Redis session storage
+  - [ ] Add session expiry handling
+  - [ ] Implement proper session validation
+- [ ] Enhance security measures
+  - [ ] Add rate limiting
+  - [ ] Implement proper session rotation
+  - [ ] Add security headers
+  - [ ] Add audit logging for auth events
+
 ## Medium Priority Tasks 🟡
 
 ### Features
@@ -140,6 +170,9 @@
 5. No way to cancel running processes
 6. Large files can cause timeout issues
 7. Missing proper validation of completed files
+8. Race conditions in state updates
+9. Inconsistent state transitions
+10. Missing error state propagation
 
 ## Future Considerations 🔮
 

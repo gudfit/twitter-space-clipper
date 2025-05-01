@@ -122,14 +122,61 @@ def chunk_transcript(transcript: str, chunk_size: int = 50000) -> List[str]:
     
     return chunks
 
+def extract_quotes_from_response(response: Dict[str, Any], chunk_num: Optional[int] = None) -> List[str]:
+    """Extract quotes from API response, handling different response formats."""
+    try:
+        # Handle DeepSeek direct response format
+        if 'role' in response and 'content' in response:
+            quotes_text = response['content'].strip()
+        # Handle format with choices array
+        elif 'choices' in response and response['choices']:
+            quotes_text = response['choices'][0]['message']['content'].strip()
+        else:
+            chunk_info = f" for chunk {chunk_num}" if chunk_num is not None else ""
+            logger.error(f"Unexpected API response format{chunk_info}: {response}")
+            return []
+            
+        if not quotes_text:
+            chunk_info = f" for chunk {chunk_num}" if chunk_num is not None else ""
+            logger.warning(f"Empty quotes response from API{chunk_info}")
+            return []
+            
+        # Split into individual quotes and clean up
+        quotes = []
+        raw_quotes = quotes_text.split('\n')
+        logger.info(f"Processing {len(raw_quotes)} raw quotes")
+        
+        for quote in raw_quotes:
+            quote = quote.strip()
+            if not quote:
+                continue
+                
+            # Remove surrounding quotes if present
+            quote = quote.strip('"')
+            
+            # Clean and validate quote
+            quote = clean_quote(quote)
+            if len(quote) <= 240:  # Twitter limit
+                quotes.append(quote)
+                logger.info(f"Added quote ({len(quote)} chars): {quote[:50]}...")
+            else:
+                logger.warning(f"Quote too long ({len(quote)} chars), skipping: {quote[:50]}...")
+        
+        return quotes
+    except Exception as e:
+        chunk_info = f" for chunk {chunk_num}" if chunk_num is not None else ""
+        logger.error(f"Error processing quotes{chunk_info}: {str(e)}")
+        return []
+
 def extract_speaker_quotes(transcript: str, speaker_info: Dict) -> List[str]:
     """Extract the best quotes for each speaker using DeepSeek"""
     try:
-        speaker = speaker_info.get('speaker')
-        if not speaker:
-            print(f"❌ No speaker provided")
-            return []
+        # If no speaker info, just extract general quotes
+        if not speaker_info or not speaker_info.get('speaker'):
+            print(f"ℹ️ No speaker information provided, extracting general quotes...")
+            return extract_general_quotes(transcript)
             
+        speaker = speaker_info.get('speaker')
         print(f"\n🔍 Analyzing transcript for quotes from {speaker}...")
         
         # Parse transcript into segments
@@ -141,19 +188,19 @@ def extract_speaker_quotes(transcript: str, speaker_info: Dict) -> List[str]:
                 all_speakers.extend(speaker_info['space_info']['speakers'])
         
         if not all_speakers:
-            print("❌ No speaker information available")
-            return []
+            print("ℹ️ No speaker information available, extracting general quotes")
+            return extract_general_quotes(transcript)
             
         segments = parse_transcript_segments(transcript, all_speakers)
         if not segments:
-            print(f"❌ No segments found for {speaker}")
-            return []
+            print(f"ℹ️ No segments found for {speaker}, extracting general quotes")
+            return extract_general_quotes(transcript)
             
         # Filter segments for this speaker
         speaker_segments = [s for s in segments if s['speaker'].lower() == speaker.lower()]
         if not speaker_segments:
-            print(f"❌ No segments found for {speaker}")
-            return []
+            print(f"ℹ️ No segments found for {speaker}, extracting general quotes")
+            return extract_general_quotes(transcript)
             
         # Process segments in chunks to avoid API limits
         all_quotes = []
@@ -169,11 +216,11 @@ def extract_speaker_quotes(transcript: str, speaker_info: Dict) -> List[str]:
 1. Be self-contained and meaningful on its own
 2. Be around 240 characters
 3. Capture a key insight, opinion, or memorable statement
-4. Be something the speaker would be proud to have quoted
+4. Be something worth quoting
 
-Format each quote on a new line, starting with the speaker's handle.
+Format each quote on a new line.
 Do not include any summary, heading, or commentary—just the quotes themselves, each on a new line. Each quote must be self-contained, under 240 characters, and require no additional explanation."""},
-                {"role": "user", "content": f"""Extract only the notable quotes from this segment by {speaker}. Return only the quotes, each on a new line. No summary, heading, or commentary.
+                {"role": "user", "content": f"""Extract only the notable quotes from this segment. Return only the quotes, each on a new line. No summary, heading, or commentary.
 {chunk}"""}
             ])
             
@@ -201,97 +248,269 @@ Do not include any summary, heading, or commentary—just the quotes themselves,
         print(f"Error extracting quotes: {str(e)}")
         return []
 
-def create_quote_thread(transcript: str, metadata: Dict[str, Any], progress_callback: Optional[Dict[str, Any]] = None) -> List[str]:
-    """Create a thread of quotes from the transcript."""
-    logger.info("Starting quote generation")
-    
+def extract_general_quotes(transcript: str) -> List[str]:
+    """Extract general quotes from transcript without speaker information."""
     try:
-        # Split transcript into chunks
+        all_quotes = []
         chunks = chunk_transcript(transcript)
-        total_chunks = len(chunks)
         
-        if progress_callback:
-            progress_callback.update({
-                'status': f'Processing {total_chunks} chunks...',
-                'progress': 0.1
-            })
+        logger.info(f"Starting general quote extraction with {len(chunks)} chunks")
         
-        quotes = []
-        for i, chunk in enumerate(chunks):
-            if progress_callback:
-                progress = 0.1 + (0.8 * (i / total_chunks))  # Scale from 10% to 90%
-                progress_callback.update({
-                    'status': f'Generating quotes from chunk {i+1}/{total_chunks}',
-                    'progress': progress
-                })
+        for i, chunk in enumerate(chunks, 1):
+            logger.info(f"Processing chunk {i}/{len(chunks)} ({len(chunk)} chars)")
             
-            # Generate quotes for this chunk
-            chunk_quotes = extract_speaker_quotes(chunk, metadata)
-            quotes.extend(chunk_quotes)
+            if not chunk.strip():
+                logger.warning(f"Chunk {i} is empty, skipping")
+                continue
+                
+            # Ask DeepSeek to extract quotes from this chunk
+            logger.info(f"Calling DeepSeek API for chunk {i}")
+            response = call_deepseek_api([
+                {"role": "system", "content": """You are an expert at identifying impactful and quotable moments from conversations. Your task is to extract the most interesting, insightful, or memorable quotes that would work well on social media. Each quote should:
+1. Be self-contained and meaningful on its own
+2. Be around 240 characters
+3. Capture a key insight, opinion, or memorable statement
+4. Represent a complete thought or important point
+
+Format each quote on a new line.
+Do not include any summary, heading, or commentary—just the quotes themselves, each on a new line. Each quote must be self-contained, under 240 characters, and require no additional explanation."""},
+                {"role": "user", "content": f"""Extract the most notable and quotable statements from this text. Return only the quotes, each on a new line. No summary, heading, or commentary.
+{chunk}"""}
+            ])
             
-            # Log progress
-            logger.info(f"Generated {len(chunk_quotes)} quotes from chunk {i+1}/{total_chunks}")
+            if not response:
+                logger.error(f"No response from API for chunk {i}")
+                continue
+                
+            if 'choices' not in response or not response['choices']:
+                logger.error(f"Invalid API response format for chunk {i}: {response}")
+                continue
+                
+            try:
+                raw_quotes = response['choices'][0]['message']['content'].strip().split('\n')
+                logger.info(f"Received {len(raw_quotes)} raw quotes from chunk {i}")
+                
+                for quote in raw_quotes:
+                    quote = quote.strip()
+                    if not quote:
+                        continue
+                    
+                    # Clean and format quote
+                    quote = clean_quote(quote)
+                    if len(quote) <= 240:  # Twitter limit
+                        all_quotes.append(quote)
+                        logger.info(f"Added quote ({len(quote)} chars): {quote[:50]}...")
+                    else:
+                        logger.warning(f"Quote too long ({len(quote)} chars), skipping: {quote[:50]}...")
+                
+            except (KeyError, AttributeError, IndexError) as e:
+                logger.error(f"Error processing API response for chunk {i}: {str(e)}")
+                continue
             
-            if progress_callback:
-                progress_callback.update({
-                    'status': f'Generated {len(chunk_quotes)} quotes from chunk {i+1}/{total_chunks}',
-                    'progress': progress
-                })
+            # Add a small delay between chunks to avoid rate limits
+            if i < len(chunks):
+                time.sleep(1)
         
-        # Filter and format quotes
-        if progress_callback:
-            progress_callback.update({
-                'status': 'Filtering and formatting quotes...',
-                'progress': 0.9
-            })
-        
-        formatted_quotes = format_quotes(quotes, metadata)
-        
-        if progress_callback:
-            progress_callback.update({
-                'status': f'Quote generation complete. Generated {len(formatted_quotes)} quotes.',
-                'progress': 1.0
-            })
-        
-        return formatted_quotes
+        if not all_quotes:
+            logger.warning("No quotes were generated from any chunks")
+        else:
+            logger.info(f"Successfully generated {len(all_quotes)} total quotes")
+            
+        return all_quotes
         
     except Exception as e:
-        logger.error(f"Error generating quotes: {str(e)}")
+        logger.exception(f"Error extracting general quotes: {str(e)}")
+        return []
+
+def create_quote_thread(transcript: str, metadata: Dict[str, Any], progress_callback: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Create a thread of quotes from the transcript."""
+    try:
+        # Initialize progress and logging
+        logger.info("Starting quote thread creation")
+        logger.info(f"Transcript length: {len(transcript)} chars")
+        logger.info(f"Metadata: {metadata}")
+        
         if progress_callback:
             progress_callback.update({
-                'status': f'Error: {str(e)}',
+                'status': 'Starting quote generation...',
                 'progress': 0.0
             })
-        raise
+        
+        # Validate input
+        if not transcript or not transcript.strip():
+            error_msg = "Empty transcript provided"
+            logger.error(error_msg)
+            if progress_callback:
+                progress_callback.update({
+                    'status': error_msg,
+                    'progress': 0.0
+                })
+            return []
+            
+        # If no speaker info, extract general quotes
+        if not metadata.get('speaker'):
+            logger.info("No speaker information provided, extracting general quotes...")
+            response = call_deepseek_api([
+                {"role": "system", "content": """You are an expert at extracting meaningful quotes from text. Focus on finding impactful, standalone statements that capture key ideas, insights, or memorable moments. Each quote should be self-contained and meaningful on its own.
+
+For each quote:
+- Keep it concise (1-3 sentences max)
+- Ensure it can stand alone without context
+- Preserve the original meaning and intent
+- Focus on insights, key points, or memorable statements
+- Avoid repetitive or redundant quotes
+- Format each quote on its own line
+
+Return only the quotes, one per line. Do not include any other text or formatting."""},
+                {"role": "user", "content": f"Extract 3-5 meaningful quotes from this text:\n\n{transcript}"}
+            ])
+            
+            if not response:
+                error_msg = "No response from API for initial quote extraction"
+                logger.error(error_msg)
+                if progress_callback:
+                    progress_callback.update({
+                        'status': error_msg,
+                        'progress': 0.0
+                    })
+                return []
+            
+            quotes = extract_quotes_from_response(response)
+            if not quotes:
+                error_msg = "No valid quotes found after processing"
+                logger.error(error_msg)
+                if progress_callback:
+                    progress_callback.update({
+                        'status': error_msg,
+                        'progress': 0.0
+                    })
+                return []
+                
+            logger.info(f"Generated {len(quotes)} general quotes")
+            return quotes
+
+        # Process speaker-specific quotes
+        speaker = metadata.get('speaker')
+        logger.info(f"Processing speaker-specific quotes for {speaker}")
+        
+        # Parse transcript into segments
+        all_speakers = []
+        if metadata.get('space_info'):
+            if metadata['space_info'].get('host'):
+                all_speakers.append(metadata['space_info']['host'])
+            if metadata['space_info'].get('speakers'):
+                all_speakers.extend(metadata['space_info']['speakers'])
+        
+        if not all_speakers:
+            logger.info("No speaker information available, falling back to general quotes")
+            return extract_general_quotes(transcript)
+            
+        segments = parse_transcript_segments(transcript, all_speakers)
+        if not segments:
+            logger.warning(f"No segments found for {speaker}, falling back to general quotes")
+            return extract_general_quotes(transcript)
+            
+        # Filter segments for this speaker
+        speaker_segments = [s for s in segments if s['speaker'].lower() == speaker.lower()]
+        if not speaker_segments:
+            logger.warning(f"No segments found for speaker {speaker}, falling back to general quotes")
+            return extract_general_quotes(transcript)
+            
+        # Process segments in chunks
+        all_quotes = []
+        speaker_text = '\n\n'.join([s['text'] for s in speaker_segments])
+        chunks = chunk_transcript(speaker_text)
+        
+        logger.info(f"Processing {len(chunks)} chunks for speaker {speaker}")
+        
+        for i, chunk in enumerate(chunks, 1):
+            logger.info(f"Processing chunk {i}/{len(chunks)} ({len(chunk)} chars)")
+            
+            if not chunk.strip():
+                logger.warning(f"Empty chunk {i}, skipping")
+                continue
+            
+            # Update progress if callback provided
+            if progress_callback:
+                progress_callback.update({
+                    'status': f'Processing chunk {i}/{len(chunks)}...',
+                    'progress': i / len(chunks)
+                })
+            
+            # Extract quotes from chunk
+            response = call_deepseek_api([
+                {"role": "system", "content": """You are an expert at identifying impactful and quotable moments from conversations. Your task is to extract the most interesting, insightful, or memorable quotes that would work well on Twitter. Each quote should:
+1. Be self-contained and meaningful on its own
+2. Be around 240 characters
+3. Capture a key insight, opinion, or memorable statement
+4. Be something worth quoting
+
+Format each quote on a new line.
+Do not include any summary, heading, or commentary—just the quotes themselves, each on a new line. Each quote must be self-contained, under 240 characters, and require no additional explanation."""},
+                {"role": "user", "content": f"""Extract only the notable quotes from this segment. Return only the quotes, each on a new line. No summary, heading, or commentary.
+{chunk}"""}
+            ])
+            
+            if not response:
+                logger.error(f"No response from API for chunk {i}")
+                continue
+            
+            chunk_quotes = extract_quotes_from_response(response, i)
+            all_quotes.extend(chunk_quotes)
+            
+            # Add a small delay between chunks to avoid rate limits
+            if i < len(chunks):
+                time.sleep(1)
+        
+        if not all_quotes:
+            error_msg = "No quotes were generated from any chunks"
+            logger.error(error_msg)
+            if progress_callback:
+                progress_callback.update({
+                    'status': error_msg,
+                    'progress': 0.0
+                })
+            return []
+            
+        logger.info(f"Successfully generated {len(all_quotes)} total quotes")
+        return all_quotes
+        
+    except Exception as e:
+        error_msg = f"Error generating quotes: {str(e)}"
+        logger.exception(error_msg)
+        if progress_callback:
+            progress_callback.update({
+                'status': error_msg,
+                'progress': 0.0
+            })
+        return []
 
 def format_quote_tweet(quote: str, speaker: str, context: str = '', speaker_info: Optional[Dict[str, Any]] = None) -> str:
-    """Format a quote as a tweet with proper attribution and context"""
-    # Get speaker's role or affiliation if available
-    role = speaker_info.get('roles', {}).get(speaker, '') if speaker_info else ''
+    """Format a quote for Twitter."""
+    # Clean the quote
+    quote = clean_quote(quote)
     
-    # Choose appropriate quote emoji based on context
-    quote_emoji = '💭'
-    if any(word in context.lower() for word in ['announce', 'reveal', 'launch']):
-        quote_emoji = '📢'
-    elif any(word in context.lower() for word in ['future', 'predict', 'vision']):
-        quote_emoji = '🔮'
-    elif any(word in context.lower() for word in ['tip', 'advice', 'recommend']):
-        quote_emoji = '💡'
+    # Add speaker attribution if not already present
+    if not quote.startswith(f"@{speaker}"):
+        quote = f"@{speaker}: {quote}"
     
-    # Format the tweet
-    tweet = f'{quote_emoji} "{quote}"'
+    return quote
+
+def format_quotes(quotes: List[str], metadata: Dict[str, Any]) -> List[str]:
+    """Format a list of quotes with proper attribution and context."""
+    formatted = []
     
-    # Add attribution
-    attribution = f"- @{speaker}"
-    if role:
-        attribution += f" ({role})"
+    # Get speaker info from metadata
+    space_info = metadata.get('space_info', {})
+    speaker = space_info.get('host', '')  # Default to host if no specific speaker
     
-    # Combine while ensuring we're under character limit
-    full_tweet = f"{tweet}\n\n{attribution}"
-    if len(full_tweet) + 3 <= 280 and context:  # Add context if there's room
-        full_tweet += f"\n\n📍 {context}"
+    for quote in quotes:
+        if quote:
+            formatted_quote = format_quote_tweet(quote, speaker, speaker_info=space_info)
+            if formatted_quote and len(formatted_quote) <= 240:  # Twitter character limit
+                formatted.append(formatted_quote)
     
-    return full_tweet
+    return formatted
 
 def main():
     """Process a transcript and create a quote thread"""

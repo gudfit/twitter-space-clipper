@@ -67,6 +67,7 @@ Common glob patterns for different rule types:
 ### Frontmatter
 - description: ACTION TRIGGER OUTCOME format
 - globs: `glob pattern for files and folders`
+- alwaysApply: true or false
 
 ### Body
 - <version>X.Y.Z</version>
