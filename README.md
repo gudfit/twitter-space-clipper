@@ -3,6 +3,7 @@
 Extract audio clips from any media source based on quotes and timestamps. Supports media, YouTube videos, podcasts, and other online media.
 
 ## Project Structure
+
 ```
 twitter-space-clipper/
 ├── run.sh               # Run the application
@@ -33,30 +34,27 @@ twitter-space-clipper/
 ```
 
 ### Understanding the Structure
+
 - **Root Directory**: Contains user-facing scripts and configuration
   - `run.sh`: Start the application
   - `requirements.txt`: Python package dependencies
-  
 - **`app/`**: Main application code
   - Uses `__init__.py` to mark it as a Python package
   - Contains the Streamlit interface and UI components
-  
 - **`core/`**: Core business logic
   - Each module handles a specific functionality
   - Independent of the UI layer
-  
 - **`utils/`**: Shared utilities
   - Common functionality used across the application
-  
 - **`.streamlit/`**: Streamlit configuration
   - `config.toml`: App theme and server settings
   - `secrets.toml`: API keys and authentication (gitignored)
-  
 - **`storage/`**: Data storage
   - Organized by content type
   - Automatically created as needed
 
 ## Features
+
 - Download media from various sources using yt-dlp
 - Transcribe audio using OpenAI's Whisper
 - Generate quotes from transcripts using DeepSeek AI
@@ -66,6 +64,7 @@ twitter-space-clipper/
 - History tracking for processed media
 
 ## Requirements
+
 - Python 3.10 or higher
 - ffmpeg for audio processing
 - DeepSeek API credentials
@@ -73,6 +72,7 @@ twitter-space-clipper/
 ## Installation
 
 1. Set up the environment:
+
 ```bash
 # Clone the repository
 git clone <repository-url>
@@ -94,6 +94,7 @@ pip install -r requirements.txt
 2. Configure Streamlit:
 
 Create `.streamlit/secrets.toml` with the following content:
+
 ```toml
 # App password
 password = "your_app_password"
@@ -104,6 +105,7 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/"
 ```
 
 3. Run the application:
+
 ```bash
 ./run.sh  # On Windows: run.bat
 ```
@@ -122,11 +124,13 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/"
    - History of processed media
 
 ## Supported Media Sources
+
 - YouTube videos
 - Podcasts
 - Any audio/video source supported by yt-dlp
 
 ## Core Modules
+
 - `core/processor.py` - Main processing pipeline
 - `core/download.py` - Media download functionality
 - `core/transcribe.py` - Audio transcription
@@ -141,25 +145,27 @@ The application uses Celery for handling long-running tasks like transcription, 
 ### Setup Redis (Broker/Backend)
 
 1. Install Redis:
+
    ```bash
    # Ubuntu/Debian
    sudo apt-get install redis-server
-   
+
    # macOS
    brew install redis
-   
+
    # Windows
    # Download from https://github.com/microsoftarchive/redis/releases
    ```
 
 2. Start Redis server:
+
    ```bash
    # Ubuntu/Debian
    sudo service redis-server start
-   
+
    # macOS
    brew services start redis
-   
+
    # Windows
    redis-server
    ```
@@ -173,16 +179,18 @@ The application uses Celery for handling long-running tasks like transcription, 
 ### Running Celery Worker
 
 1. Start the Celery worker:
+
    ```bash
    # From project root
    celery -A celery_worker.celery_app worker --loglevel=info
    ```
 
 2. For development with auto-reload:
+
    ```bash
    # Install watchdog for auto-reload
    pip install watchdog
-   
+
    # Start worker with auto-reload
    celery -A celery_worker.celery_app worker --loglevel=info --pool=solo --autoreload
    ```
@@ -190,12 +198,14 @@ The application uses Celery for handling long-running tasks like transcription, 
 ### Task Status Monitoring
 
 The application tracks task progress and status in the `storage/state/` directory. Each processing job has its own state file that includes:
+
 - Current processing stage
 - Progress percentage
 - Status messages
 - Error information (if any)
 
 ## Security Note
+
 - The app is password protected via Streamlit secrets
 - API keys are stored securely in `secrets.toml`
 - Sensitive files are gitignored
@@ -206,6 +216,7 @@ The application tracks task progress and status in the `storage/state/` director
 The application uses Redis for both Celery task management and application state storage. Configure Redis connection using environment variables:
 
 1. Create a `.env` file in the project root:
+
 ```bash
 # Redis configuration (used by both Celery and Redis manager)
 CELERY_BROKER_URL=redis://localhost:6379/0
@@ -213,12 +224,14 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/0
 ```
 
 2. Optional: If Redis requires authentication, use password in the URL:
+
 ```bash
 CELERY_BROKER_URL=redis://:password@localhost:6379/0
 CELERY_RESULT_BACKEND=redis://:password@localhost:6379/0
 ```
 
 3. For different environments, use different Redis databases (0-15):
+
 ```bash
 # Development
 CELERY_BROKER_URL=redis://localhost:6379/0
@@ -234,6 +247,7 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/2
 ```
 
 4. For testing, you can use a temporary Redis instance:
+
 ```bash
 # Start Redis in a Docker container
 docker run --name redis-test -p 6379:6379 -d redis

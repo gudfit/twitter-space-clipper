@@ -24,7 +24,12 @@ from core.types import ProcessState, create_process_state, StoragePaths
 from core.processor import get_process_state, save_process_state
 from core.redis_manager import RedisManager
 from core.state_manager import StateManager, StateStatus, StateMetadata
-from celery_worker.tasks import download_media, transcribe_audio, generate_quotes, generate_summary
+from celery_worker.tasks import (
+    download_media,
+    transcribe_media   as celery_transcribe,
+    generate_quotes_task   as celery_generate_quotes,
+    generate_summary_task  as celery_generate_summary,
+)
 from app.components.state_display import display_state, display_file_status, display_metadata
 
 # Define storage directory
@@ -699,6 +704,106 @@ if check_password():
         }
 
     def process_space_with_ui(url: str, _progress_container: Any) -> Optional[StoragePaths]:
+        """
+    End-to-end processing pipeline with Streamlit-friendly status updates.
+    Uses the “single-dict hand-off” pattern so every Celery task signature
+    stays (self, task_result: Dict[str, Any]).
+        """
+        try:
+            log_processing_step("Space processing", "started", f"URL: {url}")
+
+        # ------------------------------------------------------------------ #
+        # 0. Priming: minimal state + deterministic paths                    #
+        # ------------------------------------------------------------------ #
+            space_id = get_space_id(url)                          # local guess
+            storage_dir = str(STORAGE_DIR)                        # root folder
+
+        # Create an initial placeholder in the state store
+            state_manager.set_state(
+                space_id=space_id,
+                status="INIT",
+                metadata={"url": url, "space_id": space_id, "task_id": None},
+            )
+
+        # ------------------------------------------------------------------ #
+        # 1. Download                                                        #
+        # ------------------------------------------------------------------ #
+            state_manager.set_state(space_id=space_id, status="DOWNLOADING")
+            download_task = download_media.delay(url, storage_dir)
+            state_manager.set_state(
+                space_id=space_id,
+                status="DOWNLOADING",
+                metadata={"url": url, "space_id": space_id, "task_id": download_task.id},
+            )
+
+            download_result: Dict[str, Any] = download_task.get()  # blocks
+            space_id = download_result["space_id"]                 # definitive
+            storage_paths = get_storage_paths(storage_dir, space_id)
+            save_url_history(space_id, url)
+
+        # ------------------------------------------------------------------ #
+        # 2. Transcribe                                                      #
+        # ------------------------------------------------------------------ #
+            state_manager.set_state(space_id=space_id, status="TRANSCRIBING")
+            transcribe_task = celery_transcribe.delay(download_result)
+            state_manager.set_state(
+                space_id=space_id,
+                status="TRANSCRIBING",
+                metadata={"url": url, "space_id": space_id, "task_id": transcribe_task.id},
+            )
+
+            transcribe_result: Dict[str, Any] = transcribe_task.get()
+
+        # ------------------------------------------------------------------ #
+        # 3. Generate quotes                                                 #
+        # ------------------------------------------------------------------ #
+            state_manager.set_state(space_id=space_id, status="GENERATING_QUOTES")
+            quotes_task = celery_generate_quotes.delay(transcribe_result)
+            state_manager.set_state(
+                space_id=space_id,
+                status="GENERATING_QUOTES",
+                metadata={"url": url, "space_id": space_id, "task_id": quotes_task.id},
+            )
+
+            quotes_result: Dict[str, Any] = quotes_task.get()
+
+        # ------------------------------------------------------------------ #
+        # 4. Generate summary                                                #
+        # ------------------------------------------------------------------ #
+            state_manager.set_state(space_id=space_id, status="GENERATING_SUMMARY")
+            summary_task = celery_generate_summary.delay(quotes_result)
+            state_manager.set_state(
+                space_id=space_id,
+                status="GENERATING_SUMMARY",
+                metadata={"url": url, "space_id": space_id, "task_id": summary_task.id},
+            )
+
+            summary_task.get()  # we don’t need its return value here
+
+        # ------------------------------------------------------------------ #
+        # 5. Done                                                            #
+        # ------------------------------------------------------------------ #
+            state_manager.set_state(
+                space_id=space_id,
+                status="COMPLETE",
+                metadata={"url": url, "space_id": space_id, "task_id": None},
+            )
+
+            return storage_paths
+
+        except Exception as e:
+            logger.exception("Error processing space")
+            # ensure we still have a space_id for state recording
+            space_id = space_id if "space_id" in locals() else get_space_id(url)
+            state_manager.set_state(
+               space_id=space_id,
+                status="ERROR",
+               error=str(e),
+                metadata={"url": url, "space_id": space_id, "task_id": None},
+            )
+            return None
+
+    def process_space_with_ui1(url: str, _progress_container: Any) -> Optional[StoragePaths]:
         """Process media URL with Streamlit UI updates."""
         try:
             log_processing_step("Space processing", "started", f"URL: {url}")
@@ -742,7 +847,7 @@ if check_password():
             
             # Start transcription
             state_manager.set_state(space_id=space_id, status='TRANSCRIBING')
-            transcribe_task = transcribe_audio.delay(storage_paths['audio_path'], storage_paths['transcript_path'])
+            transcribe_task = celery_transcribe.delay(storage_paths['audio_path'], storage_paths['transcript_path'])
             
             # Update state with task ID
             state_manager.set_state(
@@ -760,7 +865,7 @@ if check_password():
             
             # Generate quotes
             state_manager.set_state(space_id=space_id, status='GENERATING_QUOTES')
-            quotes_task = generate_quotes.delay(storage_paths['transcript_path'], storage_paths['quotes_path'])
+            quotes_task = celery_generate_quotes.delay(storage_paths['transcript_path'], storage_paths['quotes_path'])
             
             # Update state with task ID
             state_manager.set_state(
@@ -885,6 +990,8 @@ if check_password():
     main_tab, summary_tab, logs_tab, history_tab, help_tab = st.tabs(["🎯 Main", "📝 Summary", "🔍 Logs", "📚 History", "❓ Help"])
 
     with main_tab:
+        selected_option = None
+        media_info = {}
         # Add dropdown for previous media
         if DOWNLOADS_DIR.exists():
             media_files: List[Path] = list(DOWNLOADS_DIR.glob("*.mp3"))
@@ -1698,7 +1805,7 @@ if check_password():
                     return
                 
                 # Start quotes task
-                task = generate_quotes.delay(
+                task = celery_generate_quotes.delay(
                     str(storage_paths['transcript_path']),
                     str(storage_paths['quotes_path'])
                 )
